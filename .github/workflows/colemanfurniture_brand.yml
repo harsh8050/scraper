@@ -133,15 +133,7 @@ jobs:
             REMAINING_FILE="remaining_input/remaining_merged.csv"
             echo "url,status,error_type,error_message,failed_at,job_id,chunk_id" > "$REMAINING_FILE"
             
-            python -c "
-import json
-with open('$JSON_FILE', 'r') as f:
-    data = json.load(f)
-urls = data.get('urls', [])
-with open('$REMAINING_FILE', 'a') as out:
-    for u in urls:
-        out.write(f'{u},,,,,,\n')
-"
+            python -c "import json, sys; data=json.load(open(sys.argv[1])); out=open(sys.argv[2], 'a'); [out.write(u+',,,,,,\n') for u in data.get('urls', [])]" "$JSON_FILE" "$REMAINING_FILE"
           fi
 
           TOTAL_URLS=$(tail -n +2 "$REMAINING_FILE" | grep -v '^$' | wc -l)
