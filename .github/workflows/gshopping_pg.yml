@@ -1,0 +1,245 @@
+name: Google Shopping Scraper (Postgres Flow)
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_filename:
+        description: "Input CSV filename (optional, ignored)"
+        required: false
+        default: ""
+        type: string
+      total_chunks:
+        description: "Number of chunks per round"
+        required: true
+        default: "250"
+        type: string
+      run_depth:
+        description: "Current recursive run depth"
+        required: true
+        default: "1"
+        type: string
+      max_depth:
+        description: "Maximum recursive run depth"
+        required: true
+        default: "50"
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - id: matrix
+        run: |
+          TOTAL_CHUNKS=${{ github.event.inputs.total_chunks || 20 }}
+
+          MATRIX="["
+          for ((i=1;i<=TOTAL_CHUNKS;i++)); do
+            MATRIX+="{\"chunk_id\":$i},"
+          done
+          MATRIX="${MATRIX%,}]"
+
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "Matrix: $MATRIX"
+
+  scrape:
+    needs: plan
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install Chrome dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            wget gnupg ca-certificates unzip xvfb libxss1 libappindicator3-1 \
+            libindicator7 libnss3 libnspr4 libatk-bridge2.0-0 libgtk-3-0 \
+            libx11-xcb1 libxcomposite1 libxrandr2 libgbm1 libasound2 \
+            fonts-liberation libu2f-udev
+
+      - name: Download fixed Google Chrome 146
+        run: |
+          CHROME_VERSION=146.0.7680.71
+          DOWNLOAD_DIR=/tmp/chrome146
+          ZIP_PATH=/tmp/chrome-${CHROME_VERSION}.zip
+          mkdir -p "$DOWNLOAD_DIR"
+          wget -qO "$ZIP_PATH" "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/${CHROME_VERSION}/linux64/chrome-linux64.zip"
+          unzip -q "$ZIP_PATH" -d "$DOWNLOAD_DIR"
+          sudo rm -rf "/opt/google-chrome-${CHROME_VERSION}"
+          sudo mv "${DOWNLOAD_DIR}/chrome-linux64" "/opt/google-chrome-${CHROME_VERSION}"
+          sudo ln -sf "/opt/google-chrome-${CHROME_VERSION}/chrome" /usr/bin/google-chrome-stable
+          sudo chmod +x "/opt/google-chrome-${CHROME_VERSION}/chrome"
+          echo "CHROME_BIN=/opt/google-chrome-${CHROME_VERSION}/chrome" >> "$GITHUB_ENV"
+
+      - name: Download matching ChromeDriver 146
+        run: |
+          CHROMEDRIVER_VERSION=146.0.7680.72
+          DRIVER_DIR=/opt/chromedriver-${CHROMEDRIVER_VERSION}
+          ZIP_PATH=/tmp/chromedriver-${CHROMEDRIVER_VERSION}.zip
+          wget -qO "$ZIP_PATH" "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/${CHROMEDRIVER_VERSION}/linux64/chromedriver-linux64.zip"
+          unzip -q "$ZIP_PATH" -d /tmp
+          sudo rm -rf "$DRIVER_DIR"
+          sudo mkdir -p "$DRIVER_DIR"
+          sudo mv /tmp/chromedriver-linux64/chromedriver "$DRIVER_DIR/"
+          sudo chmod +x "$DRIVER_DIR/chromedriver"
+          echo "CHROMEDRIVER_BIN=${DRIVER_DIR}/chromedriver" >> "$GITHUB_ENV"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install \
+            selenium==4.18.1 \
+            undetected-chromedriver==3.5.5 \
+            webdriver-manager \
+            pandas==2.1.4 \
+            beautifulsoup4==4.12.2 \
+            requests==2.31.0 \
+            lxml==4.9.3 \
+            fake-useragent==1.4.0 \
+            python-dateutil==2.8.2 \
+            psycopg2-binary==2.9.9 \
+            SQLAlchemy==2.0.25
+
+      - name: Run scraper chunk directly to Postgres
+        env:
+          DISPLAY: :99
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_PORT: ${{ secrets.FTP_PORT }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          PG_HOST: ${{ secrets.PG_HOST }}
+          PG_PORT: ${{ secrets.PG_PORT }}
+          PG_USER: ${{ secrets.PG_USER }}
+          PG_PASS: ${{ secrets.PG_PASS }}
+          PG_DB: ${{ secrets.PG_DB }}
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 3
+
+          TOTAL_CHUNKS="${{ github.event.inputs.total_chunks || 20 }}"
+
+          python -u gshopping/gscraper_pg.py \
+            --chunk-id ${{ matrix.chunk_id }} \
+            --total-chunks "$TOTAL_CHUNKS"
+
+  dispatch_next_round:
+    needs: scrape
+    if: ${{ always() && fromJSON(github.event.inputs.run_depth || '1') < fromJSON(github.event.inputs.max_depth || '50') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Install database and reporting dependencies
+        run: |
+          pip install psycopg2-binary pandas
+
+      - name: Check if there are pending products in DB
+        id: check_rem
+        env:
+          PG_HOST: ${{ secrets.PG_HOST }}
+          PG_PORT: ${{ secrets.PG_PORT }}
+          PG_USER: ${{ secrets.PG_USER }}
+          PG_PASS: ${{ secrets.PG_PASS }}
+          PG_DB: ${{ secrets.PG_DB }}
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg2
+          
+          try:
+              pg_host = os.environ.get("PG_HOST")
+              pg_port = os.environ.get("PG_PORT", "5432")
+              pg_user = os.environ.get("PG_USER")
+              pg_pass = os.environ.get("PG_PASS")
+              pg_db = os.environ.get("PG_DB")
+              
+              conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
+              cursor = conn.cursor()
+              cursor.execute("SELECT COUNT(*) FROM products_to_scrape WHERE scraping_status = 'pending' AND status = 1")
+              pending_count = cursor.fetchone()[0]
+              cursor.close()
+              conn.close()
+              
+              print(f"Pending products: {pending_count}")
+              
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  if pending_count > 0:
+                      f.write("has_remaining=true\n")
+                  else:
+                      f.write("has_remaining=false\n")
+          except Exception as e:
+              print(f"Error checking DB: {e}")
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write("has_remaining=false\n")
+          PY
+
+      - name: Trigger next round workflow
+        if: steps.check_rem.outputs.has_remaining == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const runDepth = Number('${{ github.event.inputs.run_depth || '1' }}');
+            const nextDepth = runDepth + 1;
+            const totalChunks = '${{ github.event.inputs.total_chunks || '250' }}';
+            const maxDepth = '${{ github.event.inputs.max_depth || '50' }}';
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'gshopping_pg.yml',
+              ref: 'refs/heads/main',
+              inputs: {
+                total_chunks: totalChunks,
+                run_depth: String(nextDepth),
+                max_depth: maxDepth
+              },
+            });
+
+            core.info(`Triggered next round depth=${nextDepth}`);
+
+      - name: Generate and Upload Final Reconciliation Report
+        if: steps.check_rem.outputs.has_remaining == 'false'
+        id: report_gen
+        env:
+          PG_HOST: ${{ secrets.PG_HOST }}
+          PG_PORT: ${{ secrets.PG_PORT }}
+          PG_USER: ${{ secrets.PG_USER }}
+          PG_PASS: ${{ secrets.PG_PASS }}
+          PG_DB: ${{ secrets.PG_DB }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_PORT: ${{ secrets.FTP_PORT }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH || '/scrap' }}
+        run: |
+          REPORT_NAME="final_reconciliation_report_$(date +'%Y%m%d_%H%M%S').csv"
+          python gshopping/gscraper_pg.py --export-report "$REPORT_NAME"
+          echo "report_name=$REPORT_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Report Artifact to GitHub Workflow
+        if: steps.check_rem.outputs.has_remaining == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-shopping-reconciliation-report
+          path: ${{ steps.report_gen.outputs.report_name }}
+          if-no-files-found: error
