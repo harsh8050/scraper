@@ -1850,15 +1850,34 @@ def extract_share_url(driver):
 
 def expand_more_stores(driver):
     clicks = 0
-    while clicks < 2:
+    max_clicks = 50
+    last_offer_count = 0
+    
+    try:
+        last_offer_count = len(driver.find_elements(By.CLASS_NAME, 'R5K7Cb'))
+    except:
+        pass
+
+    while clicks < max_clicks:
         try:
             more_stores = WebDriverWait(driver, 3).until(
                 EC.element_to_be_clickable((By.XPATH, "//div[contains(@class,'duf-h')]//div[@role='button']"))
             )
+            if not more_stores.is_displayed() or not more_stores.is_enabled():
+                break
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", more_stores)
+            time.sleep(0.5)
             more_stores.click()
             time.sleep(random.uniform(1.5, 2.5))
             clicks += 1
+            
+            try:
+                current_offer_count = len(driver.find_elements(By.CLASS_NAME, 'R5K7Cb'))
+                if current_offer_count <= last_offer_count:
+                    break
+                last_offer_count = current_offer_count
+            except:
+                pass
         except Exception:
             break
 
@@ -2123,8 +2142,186 @@ def run_product_selection_phase(driver, product_id, phase_name, search_url, base
 
     return fallback_result or dict(base_result), False
 
+def get_existing_product_url_from_db(product_id):
+    """Retrieve existing valid product_url from product_scraping_results if available."""
+    try:
+        conn = _get_pg_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT product_url FROM product_scraping_results WHERE product_id = %s",
+            (str(product_id),)
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if row and row[0]:
+            p_url = row[0].strip()
+            is_valid_url = p_url.startswith("https://www.google.com/search?ibp=oshop") or p_url.startswith("https://share.google/")
+            if is_valid_url:
+                return p_url
+        return None
+    except Exception as e:
+        print(f"Error fetching existing product_url from DB for {product_id}: {e}")
+        return None
+
+def extract_product_title_from_page(driver):
+    """Attempt to extract product title from the direct Google Shopping page."""
+    selectors = [
+        "//h2",  # Frequently used for product headers on Google Shopping pages
+        "//h1",
+        "//div[contains(@class, 'sh-t__title')]",
+        "//span[contains(@class, 'sh-t__title')]",
+        "//div[@class='sh-pr__title']",
+        "//div[contains(@class, 'E5oc2')]//h2",
+        "//div[@jsname='HhYL2b']//h2",
+        "//div[@jsname='Ql2bfc']//h2"
+    ]
+    for selector in selectors:
+        try:
+            element = driver.find_element(By.XPATH, selector)
+            text = element.text.strip()
+            if text:
+                return text
+        except:
+            continue
+    try:
+        title = driver.title
+        if title and "Google Shopping" in title:
+            # Clean up title if it contains suffix
+            title = title.split(" - Google Shopping")[0].strip()
+            if title:
+                return title
+    except:
+        pass
+    return ""
+
+def scrape_product_directly(driver, product_id, keyword, product_url, osb_url=""):
+    """Scrape product directly using the product_url from previous scraper results"""
+    try:
+        print(f"\nScraping Product ID (Direct): {product_id}")
+        print(f"Product URL: {product_url}")
+        
+        driver.get(product_url)
+        
+        # Handle captcha before proceeding
+        captcha_result = handle_captcha(driver, product_url)
+        if captcha_result == "failed":
+            return {
+                'product_id': product_id,
+                'keyword': keyword,
+                'url': product_url,
+                'last_response': 'Captcha solving failed',
+                'status': 'captcha_failed',
+                'last_fetched_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'product_url': product_url,
+                'seller': '',
+                'product_name': '',
+                'cid': '',
+                'pid': '',
+                'osb_position': 0,
+                'osb_id': '',
+                'seller_count': 0,
+                'competitors': [],
+                'product_about_info': json.dumps({}),
+                'main_image': '',
+                'description': '',
+                'attributes': json.dumps({})
+            }
+        
+        time.sleep(random.uniform(4, 8))
+        
+        # Initialize result structure
+        result = {
+            'product_id': product_id,
+            'keyword': keyword,
+            'url': product_url,
+            'last_response': '',
+            'product_url': product_url,
+            'seller': '',
+            'product_name': '',
+            'cid': '',
+            'pid': '',
+            'last_fetched_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'osb_position': 0,
+            'osb_id': '',
+            'seller_count': 0,
+            'status': 'completed',
+            'competitors': [],
+            'product_about_info': '',
+            'main_image': '',
+            'description': '',
+            'attributes': ''
+        }
+        
+        # Extract title from page
+        page_title = extract_product_title_from_page(driver)
+        result['product_name'] = page_title if page_title else keyword
+        
+        try:
+            # Populate offers from the current page
+            result = populate_offers_for_selected_product(driver, result, product_id, osb_url)
+            return result
+        except Exception as e:
+            result['last_response'] = f"Direct offers extraction failed: {str(e)}"
+            result['status'] = "selection_error"
+            return result
+            
+    except TimeoutException as e:
+        print(f"Timeout error scraping product {product_id} (Direct): {str(e)}")
+        traceback.print_exc()
+        return {
+            'product_id': product_id,
+            'keyword': keyword,
+            'url': product_url,
+            'last_response': f'Timeout Error: {str(e)}',
+            'status': 'timeout_error',
+            'last_fetched_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'product_url': product_url,
+            'seller': '',
+            'product_name': keyword,
+            'cid': '',
+            'pid': '',
+            'osb_position': 0,
+            'osb_id': '',
+            'seller_count': 0,
+            'competitors': [],
+            'product_about_info': json.dumps({}),
+            'main_image': '',
+            'description': '',
+            'attributes': json.dumps({})
+        }
+    except Exception as e:
+        print(f"Error scraping product {product_id} (Direct): {str(e)}")
+        traceback.print_exc()
+        return {
+            'product_id': product_id,
+            'keyword': keyword,
+            'url': product_url,
+            'last_response': f'Error: {str(e)}',
+            'status': 'error',
+            'last_fetched_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'product_url': product_url,
+            'seller': '',
+            'product_name': keyword,
+            'cid': '',
+            'pid': '',
+            'osb_position': 0,
+            'osb_id': '',
+            'seller_count': 0,
+            'competitors': [],
+            'product_about_info': json.dumps({}),
+            'main_image': '',
+            'description': '',
+            'attributes': json.dumps({})
+        }
+
 def scrape_product(driver, product_id, keyword, url, osb_url=""):
     """Scrape individual product from Google Shopping"""
+    # Check if we already have a valid product_url in product_scraping_results
+    existing_product_url = get_existing_product_url_from_db(product_id)
+    if existing_product_url:
+        return scrape_product_directly(driver, product_id, keyword, existing_product_url, osb_url)
+
     try:
         print(f"\nScraping Product ID: {product_id}")
         print(f"Keyword: {keyword}")
