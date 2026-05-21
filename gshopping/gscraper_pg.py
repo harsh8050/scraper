@@ -80,7 +80,64 @@ def parse_price(price_str):
         return None
     except: return None
 
+
+def _decode_html_entities(text):
+    """Decode HTML entities from product names (mirrors the SQL REPLACE chain)."""
+    if not text:
+        return ''
+    text = str(text)
+    text = text.replace('&quot;', '"')
+    text = text.replace('&amp;', '&')
+    text = text.replace('&lt;', '<')
+    text = text.replace('&gt;', '>')
+    return text
+
+
+def build_keyword(name, mpn=None, color=None, bed_size_measure=None, mattress_size=None):
+    """
+    Build the plain-text search keyword — mirrors the SQL `keyword` column:
+      1stopbedrooms {name} "{mpn}" "{color}" "{bed_size_measure}" "{mattress_size}"
+    """
+    parts = ['1stopbedrooms', _decode_html_entities(name)]
+    if mpn and str(mpn).strip():
+        parts.append(f'"{str(mpn).strip()}"')
+    if color and str(color).strip():
+        parts.append(f'"{str(color).strip()}"')
+    if bed_size_measure and str(bed_size_measure).strip():
+        parts.append(f'"{str(bed_size_measure).strip()}"')
+    if mattress_size and str(mattress_size).strip():
+        parts.append(f'"{str(mattress_size).strip()}"')
+    return ' '.join(parts)
+
+
+def build_search_url(name, mpn=None, color=None, bed_size_measure=None, mattress_size=None):
+    """
+    Build the Google Shopping search URL — mirrors the SQL `url` column:
+      https://www.google.com/search?q=1stopbedrooms+{name}+"{mpn}"+...&udm=28&gl=US&hl=en&pws=0
+
+    Replicates the SQL logic:
+      CONCAT(
+        'https://www.google.com/search?q=',
+        REPLACE(REPLACE(CONCAT('1stopbedrooms ', name, ' ', '"mpn"', ...), ' ', '+'), '#', ''),
+        '&udm=28&gl=US&hl=en&pws=0'
+      )
+    """
+    keyword = build_keyword(name, mpn, color, bed_size_measure, mattress_size)
+    # Replace spaces with + then strip # (matches SQL REPLACE chain)
+    query = keyword.replace(' ', '+').replace('#', '')
+    return f'https://www.google.com/search?q={query}&udm=28&gl=US&hl=en&pws=0'
+
 def insert_to_postgres(product_results, seller_results):
+    def parse_jsonb_field(val):
+        if not val:
+            return {}
+        if isinstance(val, str):
+            try:
+                return json.loads(val)
+            except Exception:
+                return {"raw_value": val}
+        return val
+
     try:
         pg_host = os.environ.get("PG_HOST")
         pg_port = os.environ.get("PG_PORT", "5432")
@@ -116,79 +173,55 @@ def insert_to_postgres(product_results, seller_results):
             prod_ids = [str(r.get("product_id", "")).strip() for r in product_results if r.get("product_id")]
             if prod_ids:
                 # Delete existing sellers for these products to prevent duplicate or stale entries
-                cursor.execute("DELETE FROM product_sellers WHERE product_code = ANY(%s)", (prod_ids,))
+                cursor.execute("DELETE FROM google_shopping_sellers WHERE product_id = ANY(%s)", (prod_ids,))
 
-        # 1. Upsert product_scraping_results (1-to-1 relationship)
+        # 1. Upsert google_shopping_results (1-to-1 relationship)
         if valid_product_results:
             prod_insert = """
-                INSERT INTO product_scraping_results (
-                    product_id, web_id, name, mpn_sku, gtin, brand, category,
-                    keyword, url, osb_url, last_response, osb_url_match, product_url,
-                    seller, product_name, cid, pid, last_fetched_date, osb_position,
-                    osb_id, seller_count, status, product_about_info, main_image,
-                    description, attributes
+                INSERT INTO google_shopping_results (
+                    product_id, google_title, google_description, gs_main_image, other_attributes,
+                    last_response, osb_url_match, google_seller_page_url, cid, pid,
+                    osb_position, osb_id, seller_count, status, scraped_at, updated_at
                 ) VALUES %s
                 ON CONFLICT (product_id) DO UPDATE SET
-                    web_id = EXCLUDED.web_id,
-                    name = EXCLUDED.name,
-                    mpn_sku = EXCLUDED.mpn_sku,
-                    gtin = EXCLUDED.gtin,
-                    brand = EXCLUDED.brand,
-                    category = EXCLUDED.category,
-                    keyword = EXCLUDED.keyword,
-                    url = EXCLUDED.url,
-                    osb_url = EXCLUDED.osb_url,
+                    google_title = EXCLUDED.google_title,
+                    google_description = EXCLUDED.google_description,
+                    gs_main_image = EXCLUDED.gs_main_image,
+                    other_attributes = EXCLUDED.other_attributes,
                     last_response = EXCLUDED.last_response,
                     osb_url_match = EXCLUDED.osb_url_match,
-                    product_url = EXCLUDED.product_url,
-                    seller = EXCLUDED.seller,
-                    product_name = EXCLUDED.product_name,
+                    google_seller_page_url = EXCLUDED.google_seller_page_url,
                     cid = EXCLUDED.cid,
                     pid = EXCLUDED.pid,
-                    last_fetched_date = EXCLUDED.last_fetched_date,
                     osb_position = EXCLUDED.osb_position,
                     osb_id = EXCLUDED.osb_id,
                     seller_count = EXCLUDED.seller_count,
                     status = EXCLUDED.status,
-                    product_about_info = EXCLUDED.product_about_info,
-                    main_image = EXCLUDED.main_image,
-                    description = EXCLUDED.description,
-                    attributes = EXCLUDED.attributes,
                     updated_at = CURRENT_TIMESTAMP
             """
             prod_values = []
             for r in valid_product_results:
                 prod_values.append((
                     str(r.get("product_id", "")),
-                    str(r.get("web_id", "")),
-                    str(r.get("name", "")),
-                    str(r.get("mpn_sku", "")),
-                    str(r.get("gtin", "")),
-                    str(r.get("brand", "")),
-                    str(r.get("category", "")),
-                    str(r.get("keyword", "")),
-                    str(r.get("url", "")),
-                    str(r.get("osb_url", "")),
+                    str(r.get("product_name", "")),
+                    str(r.get("description", "")),
+                    str(r.get("main_image", "")),
+                    psycopg2.extras.Json(parse_jsonb_field(r.get("attributes"))),
                     str(r.get("last_response", "")),
                     str(r.get("osb_url_match", "")),
                     str(r.get("product_url", "")),
-                    str(r.get("seller", "")),
-                    str(r.get("product_name", "")),
                     str(r.get("cid", "")),
                     str(r.get("pid", "")),
-                    str(r.get("last_fetched_date", "")),
                     int(r.get("osb_position", 0) or 0),
                     str(r.get("osb_id", "")),
                     int(r.get("seller_count", 0) or 0),
                     str(r.get("status", "")),
-                    str(r.get("product_about_info", "{}")),
-                    str(r.get("main_image", "")),
-                    str(r.get("description", "")),
-                    str(r.get("attributes", "{}"))
+                    datetime.now(),
+                    datetime.now()
                 ))
             execute_values(cursor, prod_insert, prod_values)
 
-        # 2. Upsert product_sellers (1-to-many relationship)
+        # 2. Upsert google_shopping_sellers (1-to-many relationship)
         valid_seller_results = []
         for r in seller_results or []:
             p_code = str(r.get("product_id", r.get("product_code", ""))).strip()
@@ -196,19 +229,48 @@ def insert_to_postgres(product_results, seller_results):
                 valid_seller_results.append(r)
 
         if valid_seller_results:
+            # Upsert into competitors first to get their IDs and base URLs
+            competitor_data = {}
+            for r in valid_seller_results:
+                s_name = str(r.get("seller", r.get("seller_name", ""))).strip()
+                if not s_name:
+                    continue
+                s_url = str(r.get("seller_url", "")).strip()
+                base_url = ""
+                if s_url:
+                    try:
+                        from urllib.parse import urlparse
+                        parsed = urlparse(s_url)
+                        if parsed.scheme and parsed.netloc:
+                            base_url = f"{parsed.scheme}://{parsed.netloc}"
+                    except Exception:
+                        pass
+                
+                # Keep the non-empty base url if we find one
+                if s_name not in competitor_data or (base_url and not competitor_data[s_name]):
+                    competitor_data[s_name] = base_url
+
+            if competitor_data:
+                competitor_insert = """
+                    INSERT INTO competitors (competitor_name, base_url)
+                    VALUES %s
+                    ON CONFLICT (competitor_name) DO UPDATE
+                    SET base_url = EXCLUDED.base_url
+                    WHERE competitors.base_url IS NULL OR competitors.base_url = ''
+                """
+                execute_values(cursor, competitor_insert, [(name, base) for name, base in competitor_data.items()])
+                
+                cursor.execute("SELECT competitor_id, competitor_name FROM competitors WHERE competitor_name = ANY(%s)", (list(competitor_data.keys()),))
+                competitor_map = {name: cid for cid, name in cursor.fetchall()}
+            else:
+                competitor_map = {}
+
             seller_insert = """
-                INSERT INTO product_sellers (
-                    product_code, seller_name, seller_price, seller_url, seller_product_name, stock_status
+                INSERT INTO google_shopping_sellers (
+                    product_id, competitor_id, seller_name, seller_product_name, seller_url, price, stock_status
                 ) VALUES %s
-                ON CONFLICT (product_code, seller_name) DO UPDATE SET
-                    seller_price = EXCLUDED.seller_price,
-                    seller_url = EXCLUDED.seller_url,
-                    seller_product_name = EXCLUDED.seller_product_name,
-                    stock_status = EXCLUDED.stock_status,
-                    updated_at = CURRENT_TIMESTAMP
             """
-            # Deduplicate multiple offers from the same seller to avoid CardinalityViolation
-            best_offers = {}
+            seller_values = []
             for r in valid_seller_results:
                 p_code = str(r.get("product_id", r.get("product_code", ""))).strip()
                 s_name = str(r.get("seller", r.get("seller_name", ""))).strip()
@@ -216,39 +278,35 @@ def insert_to_postgres(product_results, seller_results):
                 
                 if not p_code or not s_name:
                     continue
-                    
-                key = (p_code, s_name)
-                current_offer = (
-                    p_code,
-                    s_name,
-                    price,
-                    r.get("seller_url", ""),
-                    r.get("seller_product_name", ""),
-                    r.get("stock_status", "In Stock")
-                )
                 
-                if key not in best_offers:
-                    best_offers[key] = current_offer
-                else:
-                    existing_price = best_offers[key][2]
-                    # Keep the offer with the lowest valid price
-                    if price is not None and (existing_price is None or price < existing_price):
-                        best_offers[key] = current_offer
-                        
-            seller_values = list(best_offers.values())
-            execute_values(cursor, seller_insert, seller_values)
+                comp_id = competitor_map.get(s_name)
+                if not comp_id:
+                    continue
+                
+                seller_values.append((
+                    p_code,
+                    comp_id,
+                    s_name,
+                    r.get("seller_product_name", ""),
+                    r.get("seller_url", ""),
+                    price,
+                    r.get("stock_status", "In Stock")
+                ))
 
-        # 3. Transactionally update scraping_status in products_to_scrape table
+            if seller_values:
+                execute_values(cursor, seller_insert, seller_values)
+
+        # 3. Transactionally update scraping_status in osb_products table
         if product_results:
             status_update_query_fallback = """
-                UPDATE products_to_scrape
+                UPDATE osb_products
                 SET scraping_status = %s,
                     last_attempt = CURRENT_TIMESTAMP,
                     error_message = %s
                 WHERE product_id = %s
             """
             status_update_query_with_claim_clear = """
-                UPDATE products_to_scrape
+                UPDATE osb_products
                 SET scraping_status = %s,
                     last_attempt = CURRENT_TIMESTAMP,
                     error_message = %s,
@@ -262,7 +320,7 @@ def insert_to_postgres(product_results, seller_results):
                     """
                     SELECT 1
                     FROM information_schema.columns
-                    WHERE table_name = 'products_to_scrape'
+                    WHERE table_name = 'osb_products'
                       AND column_name IN ('claimed_by', 'claimed_at')
                     GROUP BY table_name
                     HAVING COUNT(*) = 2
@@ -276,7 +334,6 @@ def insert_to_postgres(product_results, seller_results):
                 p_id = str(r.get("product_id", "")).strip()
                 status_lower = str(r.get("status", "")).strip().lower()
                 
-                # Determine correct scraping status and error message
                 if p_id in retry_product_ids:
                     scr_status = 'pending'
                     err_msg = 'Invalid product URL, retrying'
@@ -308,7 +365,7 @@ def insert_to_postgres(product_results, seller_results):
         traceback.print_exc()
 
 def sync_csv_to_db(csv_path):
-    """Import CSV data into products_to_scrape table in fast batches if not already present."""
+    """Import CSV data into osb_products table in fast batches if not already present."""
     try:
         pg_host = os.environ.get("PG_HOST")
         pg_port = os.environ.get("PG_PORT", "5432")
@@ -334,7 +391,7 @@ def sync_csv_to_db(csv_path):
         cursor = conn.cursor()
 
         # Optimization: check if products are already present in DB
-        cursor.execute("SELECT COUNT(*) FROM products_to_scrape")
+        cursor.execute("SELECT COUNT(*) FROM osb_products")
         existing_count = cursor.fetchone()[0]
         if existing_count > 0:
             print(f"✓ Database already contains {existing_count} products. Skipping CSV sync to save time.")
@@ -352,13 +409,13 @@ def sync_csv_to_db(csv_path):
         print(f"Syncing {len(df)} products from CSV to DB in batches...")
 
         insert_query = """
-            INSERT INTO products_to_scrape (
-                product_id, web_id, name, mpn_sku, gtin, brand, category, keyword, url, osb_url, status, "30daymfrsales"
+            INSERT INTO osb_products (
+                product_id, web_id, name, sku, mpn, gtin, brand, product_type, keyword, url, osb_url, status, mfr_sales_30d
             )
             VALUES %s
             ON CONFLICT (product_id) DO UPDATE SET
                 status = EXCLUDED.status,
-                "30daymfrsales" = EXCLUDED."30daymfrsales",
+                mfr_sales_30d = EXCLUDED.mfr_sales_30d,
                 name = EXCLUDED.name,
                 keyword = EXCLUDED.keyword
         """
@@ -385,10 +442,11 @@ def sync_csv_to_db(csv_path):
                     clean(row_dict.get('product_id')),
                     clean(row_dict.get('web_id')),
                     clean(row_dict.get('name')),
-                    clean(row_dict.get('mpn_sku')),
+                    clean(row_dict.get('mpn_sku')),  # sku
+                    clean(row_dict.get('mpn_sku')),  # mpn
                     clean(row_dict.get('gtin')),
                     clean(row_dict.get('brand')),
-                    clean(row_dict.get('category')),
+                    clean(row_dict.get('category')), # product_type
                     clean(row_dict.get('keyword')),
                     clean(row_dict.get('url')),
                     clean(row_dict.get('osb_url')),
@@ -431,7 +489,7 @@ def get_pending_count_from_db():
 
         conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM products_to_scrape WHERE scraping_status = 'pending' AND status = 1")
+        cursor.execute("SELECT COUNT(*) FROM osb_products WHERE scraping_status = 'pending' AND status = 1")
         count = cursor.fetchone()[0]
         cursor.close()
         conn.close()
@@ -464,7 +522,7 @@ def release_expired_claims(ttl_minutes=60):
         cursor = conn.cursor()
         cursor.execute(
             """
-            UPDATE products_to_scrape
+            UPDATE osb_products
             SET scraping_status = %s,
                 claimed_by = NULL,
                 claimed_at = NULL
@@ -499,7 +557,7 @@ def claim_pending_products_from_db(limit=30, worker_id=None, ttl_minutes=60):
         try:
             cursor.execute(
                 """
-                UPDATE products_to_scrape
+                UPDATE osb_products
                 SET scraping_status = %s,
                     claimed_by = NULL,
                     claimed_at = NULL
@@ -520,13 +578,13 @@ def claim_pending_products_from_db(limit=30, worker_id=None, ttl_minutes=60):
             """
             WITH picked AS (
                 SELECT product_id
-                FROM products_to_scrape
+                FROM osb_products
                 WHERE scraping_status = %s AND status = 1
-                ORDER BY "30daymfrsales" DESC NULLS LAST, product_id ASC
+                ORDER BY mfr_sales_30d DESC NULLS LAST, product_id ASC
                 FOR UPDATE SKIP LOCKED
                 LIMIT %s
             )
-            UPDATE products_to_scrape p
+            UPDATE osb_products p
             SET scraping_status = %s,
                 claimed_by = %s,
                 claimed_at = NOW(),
@@ -534,7 +592,7 @@ def claim_pending_products_from_db(limit=30, worker_id=None, ttl_minutes=60):
                 error_message = NULL
             FROM picked
             WHERE p.product_id = picked.product_id
-            RETURNING p.*
+            RETURNING p.product_id, p.web_id, p.name, p.sku AS mpn_sku, p.gtin, p.brand, p.product_type AS category, p.keyword, p.url, p.osb_url, p.status, p.mfr_sales_30d AS "30daymfrsales", p.scraping_status, p.claimed_by, p.claimed_at, p.last_attempt, p.error_message, p.created_at, p.updated_at
             """,
             (PENDING_STATUS, int(limit), CLAIM_STATUS, worker_id),
         )
@@ -560,9 +618,10 @@ def get_pending_chunk_from_db(limit, offset):
         conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
         # Fetch only the assigned chunk's slice, ordered by sales descending
         query = """
-            SELECT * FROM products_to_scrape 
+            SELECT product_id, web_id, name, sku AS mpn_sku, gtin, brand, product_type AS category, keyword, url, osb_url, status, mfr_sales_30d AS "30daymfrsales", scraping_status, claimed_by, claimed_at, last_attempt, error_message, created_at, updated_at
+            FROM osb_products 
             WHERE scraping_status = 'pending' AND status = 1
-            ORDER BY "30daymfrsales" DESC NULLS LAST, product_id ASC
+            ORDER BY mfr_sales_30d DESC NULLS LAST, product_id ASC
             LIMIT %s OFFSET %s
         """
         df = pd.read_sql(query, conn, params=(int(limit), int(offset)))
@@ -598,7 +657,7 @@ def verify_and_claim_product(product_id, worker_id=None, ttl_minutes=60):
             """
             SELECT 1
             FROM information_schema.columns
-            WHERE table_name = 'products_to_scrape'
+            WHERE table_name = 'osb_products'
               AND column_name IN ('claimed_by', 'claimed_at')
             GROUP BY table_name
             HAVING COUNT(*) = 2
@@ -609,7 +668,7 @@ def verify_and_claim_product(product_id, worker_id=None, ttl_minutes=60):
         if not supports_claims:
             # Fallback simple check/claim
             cursor.execute(
-                "SELECT scraping_status FROM products_to_scrape WHERE product_id = %s",
+                "SELECT scraping_status FROM osb_products WHERE product_id = %s",
                 (str(product_id),)
             )
             row = cursor.fetchone()
@@ -625,7 +684,7 @@ def verify_and_claim_product(product_id, worker_id=None, ttl_minutes=60):
             
             # Atomically set to claimed
             cursor.execute(
-                "UPDATE products_to_scrape SET scraping_status = %s, last_attempt = NOW() WHERE product_id = %s AND scraping_status = %s",
+                "UPDATE osb_products SET scraping_status = %s, last_attempt = NOW() WHERE product_id = %s AND scraping_status = %s",
                 (CLAIM_STATUS, str(product_id), PENDING_STATUS)
             )
             claimed = cursor.rowcount > 0
@@ -637,7 +696,7 @@ def verify_and_claim_product(product_id, worker_id=None, ttl_minutes=60):
         # With claims support, atomically claim or renew our claim
         cursor.execute(
             """
-            UPDATE products_to_scrape
+            UPDATE osb_products
             SET scraping_status = %s,
                 claimed_by = %s,
                 claimed_at = NOW(),
@@ -661,14 +720,14 @@ def verify_and_claim_product(product_id, worker_id=None, ttl_minutes=60):
         return True
 
 def update_product_status(product_id, scraping_status, error_message=None):
-    """Update the scraping_status of a product in the products_to_scrape table."""
+    """Update the scraping_status of a product in the osb_products table."""
     try:
         conn = _get_pg_conn()
         cursor = conn.cursor()
         try:
             cursor.execute(
                 """
-                UPDATE products_to_scrape
+                UPDATE osb_products
                 SET scraping_status = %s,
                     last_attempt = CURRENT_TIMESTAMP,
                     error_message = %s,
@@ -681,7 +740,7 @@ def update_product_status(product_id, scraping_status, error_message=None):
         except Exception:
             conn.rollback()
             cursor.execute(
-                "UPDATE products_to_scrape SET scraping_status = %s, last_attempt = CURRENT_TIMESTAMP, error_message = %s WHERE product_id = %s",
+                "UPDATE osb_products SET scraping_status = %s, last_attempt = CURRENT_TIMESTAMP, error_message = %s WHERE product_id = %s",
                 (scraping_status, error_message, str(product_id)),
             )
         conn.commit()
@@ -702,7 +761,7 @@ def reset_error_products_to_pending():
         conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE products_to_scrape SET scraping_status = 'pending' WHERE scraping_status = 'error'"
+            "UPDATE osb_products SET scraping_status = 'pending' WHERE scraping_status = 'error'"
         )
         conn.commit()
         affected_rows = cursor.rowcount
@@ -731,9 +790,9 @@ def reset_invalid_url_products_for_retry():
         # Exclude products that failed with 'no_products' or 'no_match' status
         select_query = """
             SELECT product_id
-            FROM product_scraping_results
-            WHERE product_url NOT LIKE 'https://www.google.com/search?ibp=oshop%%'
-              AND product_url NOT LIKE 'https://share.google/%%'
+            FROM google_shopping_results
+            WHERE google_seller_page_url NOT LIKE 'https://www.google.com/search?ibp=oshop%%'
+              AND google_seller_page_url NOT LIKE 'https://share.google/%%'
               AND status NOT IN ('no_products', 'no_match')
         """
         cursor.execute(select_query)
@@ -741,15 +800,15 @@ def reset_invalid_url_products_for_retry():
         
         if target_ids:
             # 1. Delete seller records for these products
-            cursor.execute("DELETE FROM product_sellers WHERE product_code = ANY(%s)", (target_ids,))
+            cursor.execute("DELETE FROM google_shopping_sellers WHERE product_id = ANY(%s)", (target_ids,))
             
             # 2. Delete the scraping results for these products
-            cursor.execute("DELETE FROM product_scraping_results WHERE product_id = ANY(%s)", (target_ids,))
+            cursor.execute("DELETE FROM google_shopping_results WHERE product_id = ANY(%s)", (target_ids,))
             
-            # 3. Update products_to_scrape status to pending and clear claims/errors
+            # 3. Update osb_products status to pending and clear claims/errors
             cursor.execute(
                 """
-                UPDATE products_to_scrape
+                UPDATE osb_products
                 SET scraping_status = 'pending',
                     error_message = NULL,
                     claimed_by = NULL,
@@ -783,9 +842,9 @@ def generate_reconciliation_report(output_path):
         conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
         
         # Fetch only products that have been scraped (non-pending status)
-        products_df = pd.read_sql("SELECT * FROM products_to_scrape WHERE scraping_status != 'pending'", conn)
-        results_df = pd.read_sql("SELECT * FROM product_scraping_results", conn)
-        sellers_df = pd.read_sql("SELECT * FROM product_sellers", conn)
+        products_df = pd.read_sql("SELECT product_id, name, gtin, brand, product_type AS category, keyword, url, scraping_status FROM osb_products WHERE scraping_status != 'pending'", conn)
+        results_df = pd.read_sql("SELECT product_id, google_title AS product_name, seller_count, osb_position, updated_at, google_seller_page_url AS url, osb_url_match FROM google_shopping_results", conn)
+        sellers_df = pd.read_sql("SELECT product_id AS product_code, seller_name, price AS seller_price, seller_url, stock_status FROM google_shopping_sellers", conn)
         conn.close()
 
         if products_df.empty:
@@ -2143,12 +2202,12 @@ def run_product_selection_phase(driver, product_id, phase_name, search_url, base
     return fallback_result or dict(base_result), False
 
 def get_existing_product_url_from_db(product_id):
-    """Retrieve existing valid product_url from product_scraping_results if available."""
+    """Retrieve existing valid product_url from google_shopping_results if available."""
     try:
         conn = _get_pg_conn()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT product_url FROM product_scraping_results WHERE product_id = %s",
+            "SELECT google_seller_page_url FROM google_shopping_results WHERE product_id = %s",
             (str(product_id),)
         )
         row = cursor.fetchone()
@@ -2582,6 +2641,27 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                 gtin = row['gtin']
                 brand = row['brand']
                 cat = row['category']
+
+                # Build/regenerate the search URL if it's missing or blank
+                if not url or not str(url).strip():
+                    url = build_search_url(
+                        name=name,
+                        mpn=mpnsku,
+                        color=row.get('color'),
+                        bed_size_measure=row.get('bed_size_measure'),
+                        mattress_size=row.get('mattress_size')
+                    )
+                    print(f"[URL regenerated] {url}")
+
+                # Also rebuild keyword if blank
+                if not keyword or not str(keyword).strip():
+                    keyword = build_keyword(
+                        name=name,
+                        mpn=mpnsku,
+                        color=row.get('color'),
+                        bed_size_measure=row.get('bed_size_measure'),
+                        mattress_size=row.get('mattress_size')
+                    )
                 
                 print(f"\nProcessing {index+1}/{len(df)}: Product ID {product_id}")
                 
