@@ -3110,8 +3110,8 @@ def split_dataframe_to_chunk_files(df, output_dir, total_chunks, prefix):
     return chunk_files
 
 
-def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', worker_id=None, ttl_minutes=60, max_runtime_seconds=None, max_workers=3):
-    """Process a chunk of products in parallel"""
+def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', worker_id=None, ttl_minutes=60, max_runtime_seconds=None, max_workers=1):
+    """Process a chunk of products"""
     try:
         if df is None or df.empty:
             print(f"Chunk {chunk_id} is empty, skipping")
@@ -3128,7 +3128,10 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
         resolved_worker_id = _get_worker_id(worker_id)
         started_at = time.monotonic()
 
-        print(f"Processing {len(df)} products from chunk {chunk_id} with {max_workers} threads")
+        if max_workers > 1:
+            print(f"Processing {len(df)} products from chunk {chunk_id} in parallel with {max_workers} threads")
+        else:
+            print(f"Processing {len(df)} products from chunk {chunk_id} sequentially")
         
         # Initialize results (thread-safe operations)
         product_results = []
@@ -3266,16 +3269,19 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                 except Exception:
                     pass
 
-        # Execute parallel workers using ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(worker_thread) for _ in range(max_workers)]
-            # Wait for all workers to finish
-            for future in futures:
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"Worker thread execution error: {e}")
-                    traceback.print_exc()
+        # Execute workers: parallel if max_workers > 1, else sequential in the main thread
+        if max_workers > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(worker_thread) for _ in range(max_workers)]
+                # Wait for all workers to finish
+                for future in futures:
+                    try:
+                        future.result()
+                    except Exception as e:
+                        print(f"Worker thread execution error: {e}")
+                        traceback.print_exc()
+        else:
+            worker_thread()
 
         # Identify processed product IDs
         processed_pids = {str(r.get('product_id', '')).strip(): r for r in product_results}
@@ -3469,7 +3475,7 @@ def main():
     parser.add_argument('--max-runtime-hours', type=float, default=_env_float("MAX_RUNTIME_HOURS", DEFAULT_MAX_RUNTIME_HOURS), help='Maximum hours this worker should process')
     parser.add_argument('--claim-ttl-minutes', type=int, default=_env_int("CLAIM_TTL_MINUTES", None), help='Release claims older than this TTL')
     parser.add_argument('--worker-id', type=str, default=os.environ.get("SCRAPER_WORKER_ID", None), help='Worker identifier stored in DB claims')
-    parser.add_argument('--max-workers', type=int, default=_env_int("MAX_WORKERS", 3), help='Number of parallel worker threads inside this chunk')
+    parser.add_argument('--max-workers', type=int, default=_env_int("MAX_WORKERS", 1), help='Number of parallel worker threads inside this chunk (default: 1, sequential)')
     
     args = parser.parse_args()
     args.claim_limit = int(args.claim_limit) if args.claim_limit is not None else None
