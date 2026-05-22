@@ -164,7 +164,25 @@ def main():
     print("Fetching active products, scraped results, and competitor sellers...")
     try:
         products_df = pd.read_sql(
-            "SELECT product_id, name, gtin, brand, product_type AS category, keyword, url, osb_url, price, margin, scraping_status FROM osb_products WHERE status = 1 AND scraping_status = 'completed'",
+            """
+            SELECT 
+                p.product_id, 
+                p.name, 
+                p.gtin, 
+                p.brand, 
+                p.product_type AS category, 
+                p.keyword, 
+                p.url, 
+                p.osb_url, 
+                p.price, 
+                p.margin, 
+                p.scraping_status 
+            FROM osb_products p
+            JOIN google_shopping_results r ON p.product_id = r.product_id
+            WHERE p.status = 1 
+              AND p.scraping_status = 'completed'
+              AND r.osb_url_match = 'Yes'
+            """,
             conn
         )
         results_df = pd.read_sql(
@@ -179,7 +197,9 @@ def main():
                 r.osb_url_match 
             FROM google_shopping_results r
             JOIN osb_products p ON r.product_id = p.product_id
-            WHERE p.status = 1 AND p.scraping_status = 'completed'
+            WHERE p.status = 1 
+              AND p.scraping_status = 'completed'
+              AND r.osb_url_match = 'Yes'
             """,
             conn
         )
@@ -195,8 +215,11 @@ def main():
                 c.base_url
             FROM google_shopping_sellers s
             JOIN osb_products p ON s.product_id = p.product_id
+            JOIN google_shopping_results r ON s.product_id = r.product_id
             LEFT JOIN competitors c ON s.competitor_id = c.competitor_id
-            WHERE p.status = 1 AND p.scraping_status = 'completed'
+            WHERE p.status = 1 
+              AND p.scraping_status = 'completed'
+              AND r.osb_url_match = 'Yes'
             """,
             conn
         )
