@@ -1224,7 +1224,7 @@ def reset_error_products_to_pending():
         conn = psycopg2.connect(host=pg_host, port=pg_port, user=pg_user, password=pg_pass, dbname=pg_db)
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE osb_products SET scraping_status = 'pending' WHERE scraping_status = 'error'"
+            "UPDATE osb_products SET scraping_status = 'pending', claimed_at = NULL, claimed_by = NULL WHERE scraping_status = 'error'"
         )
         conn.commit()
         affected_rows = cursor.rowcount
@@ -3772,6 +3772,7 @@ def main():
     total_pending = get_pending_count_from_db()
     if total_pending == 0:
         print("No pending products found in DB. All done!")
+        reset_error_products_to_pending()
         sys.exit(0)
 
     print(f"Total pending products in DB: {total_pending}")
@@ -3785,6 +3786,7 @@ def main():
         chunk_df = claim_pending_products_from_db(limit=effective_claim_limit, worker_id=args.worker_id, ttl_minutes=args.claim_ttl_minutes)
         if chunk_df.empty:
             print("No claimable pending products found (or claim columns missing).")
+            reset_error_products_to_pending()
             sys.exit(0)
         chunk_result = process_chunk(
             chunk_df,
@@ -3796,6 +3798,7 @@ def main():
             max_workers=args.max_workers,
         )
         success = chunk_result.get("success", False)
+        reset_error_products_to_pending()
         sys.exit(0 if success else 1)
 
     # Legacy mode: calculate balanced limit and offset for this chunk.
@@ -3823,6 +3826,7 @@ def main():
     
     if chunk_df.empty:
         print(f"Chunk {args.chunk_id} has no products to process.")
+        reset_error_products_to_pending()
         sys.exit(0)
 
     chunk_result = process_chunk(
@@ -3835,6 +3839,8 @@ def main():
         max_workers=args.max_workers,
     )
     success = chunk_result.get("success", False)
+    
+    reset_error_products_to_pending()
     
     if success:
         print("\n✓ Chunk processing completed successfully")
