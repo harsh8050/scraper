@@ -1012,6 +1012,118 @@ def claim_pending_products_from_db(limit=30, worker_id=None, ttl_minutes=60):
             except Exception:
                 pass
 
+def get_product_ids_in_boundary(start_sales, start_id, end_sales, end_id):
+    """Fetch all active products (status = 1) in the sorted boundary, regardless of scraping_status."""
+    conn = None
+    cursor = None
+    try:
+        conn = _get_pg_conn()
+        cursor = conn.cursor()
+        
+        params = []
+        clauses = ["status = 1"]
+        if start_id:
+            sales_val = int(start_sales) if (start_sales is not None and start_sales != '') else 0
+            params.extend([sales_val, sales_val, str(start_id)])
+            clauses.append("(mfr_sales_30d < %s OR (mfr_sales_30d = %s AND product_id >= %s))")
+        if end_id:
+            sales_val = int(end_sales) if (end_sales is not None and end_sales != '') else 0
+            params.extend([sales_val, sales_val, str(end_id)])
+            clauses.append("(mfr_sales_30d > %s OR (mfr_sales_30d = %s AND product_id <= %s))")
+            
+        query = f"""
+            SELECT product_id 
+            FROM osb_products 
+            WHERE {" AND ".join(clauses)}
+            ORDER BY mfr_sales_30d DESC NULLS LAST, product_id ASC
+        """
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        return [r[0] for r in rows]
+    except Exception as e:
+        print(f"Error fetching product IDs in boundary: {e}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+def claim_specific_products_from_db(product_ids, worker_id=None, limit=30, ttl_minutes=60):
+    """Claim only from the pre-selected static list of product IDs."""
+    if not product_ids:
+        return pd.DataFrame()
+        
+    conn = None
+    cursor = None
+    try:
+        worker_id = _get_worker_id(worker_id)
+        conn = _get_pg_conn()
+        conn.autocommit = False
+        cursor = conn.cursor()
+        
+        # Release expired claims first (best-effort)
+        try:
+            cursor.execute(
+                """
+                UPDATE osb_products
+                SET scraping_status = %s,
+                    claimed_by = NULL,
+                    claimed_at = NULL
+                WHERE product_id IN (
+                    SELECT product_id FROM osb_products
+                    WHERE scraping_status = %s
+                      AND claimed_at IS NOT NULL
+                      AND claimed_at < (NOW() - (%s || ' minutes')::interval)
+                    FOR UPDATE SKIP LOCKED
+                )
+                """,
+                (PENDING_STATUS, CLAIM_STATUS, int(ttl_minutes)),
+            )
+        except Exception:
+            conn.rollback()
+            return pd.DataFrame()
+
+        # Now claim from specific list of product IDs that are still pending
+        cursor.execute(
+            """
+            WITH picked AS (
+                SELECT product_id
+                FROM osb_products
+                WHERE product_id = ANY(%s)
+                  AND scraping_status = %s 
+                  AND status = 1
+                ORDER BY mfr_sales_30d DESC NULLS LAST, product_id ASC
+                FOR UPDATE SKIP LOCKED
+                LIMIT %s
+            )
+            UPDATE osb_products p
+            SET scraping_status = %s,
+                claimed_by = %s,
+                claimed_at = NOW(),
+                last_attempt = NOW(),
+                error_message = NULL
+            FROM picked
+            WHERE p.product_id = picked.product_id
+            RETURNING p.product_id, p.web_id, p.name, p.sku AS mpn_sku, p.gtin, p.brand, p.product_type AS category, p.keyword, p.url, p.osb_url, p.status, p.mfr_sales_30d AS "30daymfrsales", p.scraping_status, p.claimed_by, p.claimed_at, p.last_attempt, p.error_message, p.created_at, p.updated_at
+            """,
+            (product_ids, PENDING_STATUS, int(limit), CLAIM_STATUS, worker_id),
+        )
+        rows = cursor.fetchall()
+        cols = [d[0] for d in cursor.description] if cursor.description else []
+        conn.commit()
+        return pd.DataFrame(rows, columns=cols)
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"Error claiming specific products from DB: {e}")
+        return pd.DataFrame()
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
 def get_pending_chunk_from_db(limit, offset):
     """Fetch only a specific partitioned slice of pending products using SQL LIMIT and OFFSET."""
     conn = None
@@ -3728,6 +3840,10 @@ def main():
     parser.add_argument('--claim-ttl-minutes', type=int, default=_env_int("CLAIM_TTL_MINUTES", None), help='Release claims older than this TTL')
     parser.add_argument('--worker-id', type=str, default=os.environ.get("SCRAPER_WORKER_ID", None), help='Worker identifier stored in DB claims')
     parser.add_argument('--max-workers', type=int, default=_env_int("MAX_WORKERS", 2), help='Number of parallel worker threads inside this chunk (default: 1, sequential)')
+    parser.add_argument('--start-sales', type=str, default=None, help='Start sales boundary for this account partition')
+    parser.add_argument('--start-id', type=str, default=None, help='Start product ID boundary for this account partition')
+    parser.add_argument('--end-sales', type=str, default=None, help='End sales boundary for this account partition')
+    parser.add_argument('--end-id', type=str, default=None, help='End product ID boundary for this account partition')
     
     args = parser.parse_args()
     args.claim_limit = int(args.claim_limit) if args.claim_limit is not None else None
@@ -3778,12 +3894,37 @@ def main():
     print(f"Total pending products in DB: {total_pending}")
 
     if not args.offset_mode:
-        print(
-            f"DB claim queue enabled: worker={_get_worker_id(args.worker_id)} "
-            f"limit={effective_claim_limit} ttl={args.claim_ttl_minutes}m "
-            f"runtime={args.max_runtime_hours}h rate={args.products_per_hour}/h"
-        )
-        chunk_df = claim_pending_products_from_db(limit=effective_claim_limit, worker_id=args.worker_id, ttl_minutes=args.claim_ttl_minutes)
+        if args.start_id or args.end_id:
+            print(f"Boundary partition mode: start=({args.start_sales}, {args.start_id}) end=({args.end_sales}, {args.end_id})")
+            product_ids = get_product_ids_in_boundary(args.start_sales, args.start_id, args.end_sales, args.end_id)
+            M = len(product_ids)
+            print(f"Total products in account boundary: {M}")
+            if M == 0:
+                print("No products in boundary. Exiting.")
+                sys.exit(0)
+                
+            base_rows = M // args.total_chunks
+            remainder = M % args.total_chunks
+            limit = base_rows + (1 if args.chunk_id <= remainder else 0)
+            offset = (args.chunk_id - 1) * base_rows + min(args.chunk_id - 1, remainder)
+            
+            worker_product_ids = product_ids[offset : offset + limit]
+            print(f"Worker chunk {args.chunk_id} of {args.total_chunks}: Slice size={len(worker_product_ids)} (Offset={offset}, Limit={limit})")
+            
+            chunk_df = claim_specific_products_from_db(
+                worker_product_ids, 
+                worker_id=args.worker_id, 
+                limit=effective_claim_limit, 
+                ttl_minutes=args.claim_ttl_minutes
+            )
+        else:
+            print(
+                f"DB claim queue enabled: worker={_get_worker_id(args.worker_id)} "
+                f"limit={effective_claim_limit} ttl={args.claim_ttl_minutes}m "
+                f"runtime={args.max_runtime_hours}h rate={args.products_per_hour}/h"
+            )
+            chunk_df = claim_pending_products_from_db(limit=effective_claim_limit, worker_id=args.worker_id, ttl_minutes=args.claim_ttl_minutes)
+            
         if chunk_df.empty:
             print("No claimable pending products found (or claim columns missing).")
             reset_error_products_to_pending()

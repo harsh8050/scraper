@@ -8,6 +8,26 @@ on:
         required: false
         default: ""
         type: string
+      start_sales:
+        description: "Start sales boundary for this account partition"
+        required: false
+        default: ""
+        type: string
+      start_id:
+        description: "Start product ID boundary for this account partition"
+        required: false
+        default: ""
+        type: string
+      end_sales:
+        description: "End sales boundary for this account partition"
+        required: false
+        default: ""
+        type: string
+      end_id:
+        description: "End product ID boundary for this account partition"
+        required: false
+        default: ""
+        type: string
       total_chunks:
         description: "Parallel workers to run in this account"
         required: true
@@ -183,7 +203,11 @@ jobs:
             --total-chunks "$TOTAL_WORKERS" \
             --products-per-hour "$PRODUCTS_PER_HOUR" \
             --max-runtime-hours "$MAX_RUNTIME_HOURS" \
-            --worker-id "$SCRAPER_WORKER_ID"
+            --worker-id "$SCRAPER_WORKER_ID" \
+            --start-sales "${{ github.event.inputs.start_sales }}" \
+            --start-id "${{ github.event.inputs.start_id }}" \
+            --end-sales "${{ github.event.inputs.end_sales }}" \
+            --end-id "${{ github.event.inputs.end_id }}"
 
   dispatch_next_round:
     needs: scrape
@@ -259,6 +283,10 @@ jobs:
             const productsPerHour = '${{ github.event.inputs.products_per_hour || '35' }}';
             const maxRuntimeHours = '${{ github.event.inputs.max_runtime_hours || '6' }}';
             const claimLimit = '${{ github.event.inputs.claim_limit }}';
+            const startSales = '${{ github.event.inputs.start_sales }}';
+            const startId = '${{ github.event.inputs.start_id }}';
+            const endSales = '${{ github.event.inputs.end_sales }}';
+            const endId = '${{ github.event.inputs.end_id }}';
 
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
@@ -272,7 +300,11 @@ jobs:
                 claim_limit: claimLimit,
                 run_depth: String(nextDepth),
                 max_depth: maxDepth,
-                reset_errors: 'false'
+                reset_errors: 'false',
+                start_sales: startSales,
+                start_id: startId,
+                end_sales: endSales,
+                end_id: endId
               },
             });
 
