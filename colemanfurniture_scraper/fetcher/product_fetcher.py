@@ -225,7 +225,10 @@ class ProductFetcher(Spider):
                 self.success_db_write_counter = 0
         except Exception as e:
             self.logger.error(f"❌ Failed to persist successful URL {normalized_url}: {e}")
-          
+    async def start(self):
+        for req in self.start_requests():
+            yield req
+
     def start_requests(self):
         if self.is_ashley:
             # Filter URLs for this chunk if in chunk mode

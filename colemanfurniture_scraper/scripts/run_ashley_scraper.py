@@ -48,6 +48,10 @@ class AshleyURLSpider(scrapy.Spider):
         self.url_list = kwargs.get('url_list')
         self.concurrent_pages = int(kwargs.get('concurrent_pages', 20))
         
+    async def start(self):
+        for req in self.start_requests():
+            yield req
+
     def start_requests(self):
         """Start multiple page requests concurrently"""
         for page in range(self.start_page, self.end_page + 1):
