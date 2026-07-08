@@ -424,6 +424,33 @@ class ProductFetcher(Spider):
                 self.logger.warning(f"⚠️ No Product JSON-LD found for {response.url}")
             return
     
+    # Keys whose subtrees should never be walked for product URLs
+    _EXCLUDED_URL_KEYS = frozenset({
+        'crossSell', 'breadcrumb', 'categoryTree',
+        'accordion', 'header', 'footer', 'splitTest', 'meta',
+    })
+
+    @staticmethod
+    def _collect_htm_urls(obj, found=None, _skip_keys=None):
+        """Recursively walk any JSON structure and collect all .htm product URLs,
+        skipping subtrees under excluded keys (crossSell, breadcrumb, etc.)."""
+        if found is None:
+            found = set()
+        if _skip_keys is None:
+            _skip_keys = frozenset()
+        if isinstance(obj, dict):
+            for key, val in obj.items():
+                if key in _skip_keys:
+                    continue  # skip this entire subtree
+                if key == 'url' and isinstance(val, str) and val.endswith('.htm'):
+                    found.add(val)
+                else:
+                    ProductFetcher._collect_htm_urls(val, found, _skip_keys)
+        elif isinstance(obj, list):
+            for item in obj:
+                ProductFetcher._collect_htm_urls(item, found, _skip_keys)
+        return found
+
     def extract_bundle_products(self, response):
         json_script = response.xpath('//script[@data-hypernova-key="App"]/text()').get()
         if not json_script:
@@ -437,50 +464,36 @@ class ProductFetcher(Spider):
             json_script = json_script.strip()
             data = json.loads(json_script)
             content = data.get('data', {}).get('content', {})
-            product_layouts = content.get('productLayouts', {})
-            simple_items = product_layouts.get('simpleItems', [])
 
-            # Also collect URLs from setIncludes.items
-            set_include_items = content.get('setIncludes', {}).get('items', [])
-            if isinstance(set_include_items, list):
-                simple_items = list(simple_items) + [
-                    {'url': i.get('url'), 'itemShortName': i.get('name', i.get('title', ''))}
-                    for i in set_include_items
-                    if isinstance(i, dict) and i.get('url')
-                ]
+            # Deep-scan the entire content blob for any .htm URL
+            # (skipping crossSell, breadcrumb, categoryTree, accordion, etc.)
+            all_urls = self._collect_htm_urls(content, _skip_keys=self._EXCLUDED_URL_KEYS)
+            # Exclude the current page itself
+            all_urls.discard(response.url)
+            all_urls.discard(response.url.rstrip('/'))
 
             bundle_count = 0
-            for item in simple_items:
-                if isinstance(item, dict):
-                    sub_product_url = item.get('url')
-                    item_short_name = item.get('itemShortName', '')
-                    if not sub_product_url or sub_product_url == response.url:
-                        if self.verbose:
-                            self.logger.info(f"⏭️ Skipping self-reference or empty URL: {sub_product_url}")
-                        continue
-                    
-                    normalized_url = self.normalize_url(sub_product_url)
-                    if not self._should_schedule_url(sub_product_url):
-                        if self.verbose:
-                            self.logger.info(f"⏭️ Bundle product already tracked: {item_short_name} - {normalized_url}")
-                        continue
-                    bundle_count += 1
-                    
+            for sub_product_url in all_urls:
+                if not self._should_schedule_url(sub_product_url):
                     if self.verbose:
-                        self.logger.info(f"📦 Found bundle product #{bundle_count}: {item_short_name}")
-                    
-                    yield Request(
-                        sub_product_url,
-                        callback=self.parse_product_page_with_check,
-                        meta={'url': sub_product_url, 'is_bundle': True},
-                        errback=self.handle_product_error
-                    )
-            
+                        self.logger.info(f"⏭️ Bundle product already tracked: {sub_product_url}")
+                    continue
+                bundle_count += 1
+                if self.verbose:
+                    self.logger.info(f"📦 Found bundle product #{bundle_count}: {sub_product_url}")
+                yield Request(
+                    sub_product_url,
+                    callback=self.parse_product_page_with_check,
+                    meta={'url': sub_product_url, 'is_bundle': True},
+                    errback=self.handle_product_error
+                )
+
             if bundle_count > 0:
                 self.logger.info(f"📦 Added {bundle_count} bundle products from {response.url}")
-                
+
         except Exception as e:
             self.logger.error(f"Error extracting bundle products: {e}")
+
 
     def parse_product_page(self, response):
         item = {}
@@ -524,12 +537,8 @@ class ProductFetcher(Spider):
             except Exception as e:
                 self.logger.error(f"Error parsing Hypernova script in parse_product_page: {e}")
 
-        # 1. Product Type: simple or bundle
-        simple_items = content.get('productLayouts', {}).get('simpleItems', [])
-        if simple_items and isinstance(simple_items, list) and len(simple_items) > 0:
-            product_type = "bundle"
-        else:
-            product_type = "simple"
+        # 1. Product Type: read directly from productInfo.type (bundle/simple/configurable etc.)
+        product_type = content.get('productInfo', {}).get('type', 'simple')
         item['Product Type'] = product_type
 
         # 2. Row JSON — content sub-object only (csv viewer shows "" due to CSV spec, data is correct)
