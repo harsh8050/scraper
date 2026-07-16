@@ -249,13 +249,27 @@ jobs:
               mysql_pass = os.environ.get("MYSQL_PASS")
               mysql_db = os.environ.get("MYSQL_DB")
               
-              conn = pymysql.connect(
-                  host=mysql_host,
-                  port=mysql_port,
-                  user=mysql_user,
-                  password=mysql_pass,
-                  database=mysql_db
-              )
+              import time
+              conn = None
+              max_retries = 5
+              for attempt in range(1, max_retries + 1):
+                  try:
+                      conn = pymysql.connect(
+                          host=mysql_host,
+                          port=mysql_port,
+                          user=mysql_user,
+                          password=mysql_pass,
+                          database=mysql_db,
+                          connect_timeout=15
+                      )
+                      print(f"Successfully connected to MySQL on attempt {attempt}")
+                      break
+                  except Exception as err:
+                      print(f"Connection attempt {attempt} failed: {err}")
+                      if attempt == max_retries:
+                          raise
+                      time.sleep(2 ** attempt)
+              
               cursor = conn.cursor()
               cursor.execute("""
                   SELECT

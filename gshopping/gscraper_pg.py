@@ -104,11 +104,15 @@ def _decode_html_entities(text):
     return text
 
 
-def build_keyword(name, mpn=None, color=None, bed_size_measure=None, mattress_size=None):
+def build_keyword(name, mpn=None, color=None, bed_size_measure=None, mattress_size=None, grouping_attr_1_value=None, grouping_attr_2_value=None):
     """
     Build the plain-text search keyword — mirrors the SQL `keyword` column:
       1stopbedrooms {name} "{mpn}" "{color}" "{bed_size_measure}" "{mattress_size}"
+    
+    If grouping attributes are provided, uses:
+      1stopbedrooms {{product name}} {{mpn}} {{first attribute value (if not available then color)}} {{second attribute value}}
     """
+    # --- Existing Logic ---
     parts = ['1stopbedrooms', _decode_html_entities(name)]
     if mpn and str(mpn).strip():
         parts.append(f'"{str(mpn).strip()}"')
@@ -118,22 +122,39 @@ def build_keyword(name, mpn=None, color=None, bed_size_measure=None, mattress_si
         parts.append(f'"{str(bed_size_measure).strip()}"')
     if mattress_size and str(mattress_size).strip():
         parts.append(f'"{str(mattress_size).strip()}"')
+        
+    # --- New Logic Added Below ---
+    if grouping_attr_1_value is not None or grouping_attr_2_value is not None:
+        parts = ['1stopbedrooms', _decode_html_entities(name)]
+        if mpn and str(mpn).strip():
+            parts.append(f'"{str(mpn).strip()}"')
+        
+        first_attr = grouping_attr_1_value
+        if not first_attr or not str(first_attr).strip():
+            first_attr = color
+            
+        if first_attr and str(first_attr).strip():
+            parts.append(f'"{str(first_attr).strip()}"')
+            
+        if grouping_attr_2_value and str(grouping_attr_2_value).strip():
+            parts.append(f'"{str(grouping_attr_2_value).strip()}"')
+            
     return ' '.join(parts)
 
 
-def build_search_url(name, mpn=None, color=None, bed_size_measure=None, mattress_size=None):
+def build_search_url(name, mpn=None, color=None, bed_size_measure=None, mattress_size=None, grouping_attr_1_value=None, grouping_attr_2_value=None):
     """
-    Build the Google Shopping search URL — mirrors the SQL `url` column:
-      https://www.google.com/search?q=1stopbedrooms+{name}+"{mpn}"+...&udm=28&gl=US&hl=en&pws=0
-
-    Replicates the SQL logic:
-      CONCAT(
-        'https://www.google.com/search?q=',
-        REPLACE(REPLACE(CONCAT('1stopbedrooms ', name, ' ', '"mpn"', ...), ' ', '+'), '#', ''),
-        '&udm=28&gl=US&hl=en&pws=0'
-      )
+    Build the Google Shopping search URL — mirrors the SQL `url` column.
     """
-    keyword = build_keyword(name, mpn, color, bed_size_measure, mattress_size)
+    keyword = build_keyword(
+        name=name,
+        mpn=mpn,
+        color=color,
+        bed_size_measure=bed_size_measure,
+        mattress_size=mattress_size,
+        grouping_attr_1_value=grouping_attr_1_value,
+        grouping_attr_2_value=grouping_attr_2_value
+    )
     # Replace spaces with + then strip # (matches SQL REPLACE chain)
     query = keyword.replace(' ', '+').replace('#', '')
     return f'https://www.google.com/search?q={query}&udm=28&gl=US&hl=en&pws=0'
@@ -1356,7 +1377,7 @@ def claim_pending_products_from_db(limit=30, worker_id=None, ttl_minutes=60):
             
             cursor.execute(
                 f"""
-                SELECT product_id, web_id, name, sku AS mpn_sku, gtin, brand, product_type AS category, keyword, url, osb_url, status, mfr_sales_30d AS `30daymfrsales`, scraping_status, claimed_by, claimed_at, last_attempt, error_message, created_at, updated_at, color, bed_size_measure, mattress_size
+                SELECT product_id, web_id, name, sku AS mpn_sku, gtin, brand, product_type AS category, keyword, url, osb_url, status, mfr_sales_30d AS `30daymfrsales`, scraping_status, claimed_by, claimed_at, last_attempt, error_message, created_at, updated_at, color, bed_size_measure, mattress_size, grouping_attr_1_value, grouping_attr_2_value
                 FROM osb_products
                 WHERE product_id IN ({placeholders})
                 """,
@@ -1524,7 +1545,7 @@ def claim_specific_products_from_db(product_ids, worker_id=None, limit=30, ttl_m
 
             cursor.execute(
                 f"""
-                SELECT product_id, web_id, name, sku AS mpn_sku, gtin, brand, product_type AS category, keyword, url, osb_url, status, mfr_sales_30d AS `30daymfrsales`, scraping_status, claimed_by, claimed_at, last_attempt, error_message, created_at, updated_at, color, bed_size_measure, mattress_size
+                SELECT product_id, web_id, name, sku AS mpn_sku, gtin, brand, product_type AS category, keyword, url, osb_url, status, mfr_sales_30d AS `30daymfrsales`, scraping_status, claimed_by, claimed_at, last_attempt, error_message, created_at, updated_at, color, bed_size_measure, mattress_size, grouping_attr_1_value, grouping_attr_2_value
                 FROM osb_products
                 WHERE product_id IN ({placeholders_picked})
                 """,
@@ -1558,7 +1579,7 @@ def get_pending_chunk_from_db(limit, offset):
         create_tables_if_needed()
         # Fetch only the assigned chunk's slice, ordered by sales descending
         query = """
-            SELECT product_id, web_id, name, sku AS mpn_sku, gtin, brand, product_type AS category, keyword, url, osb_url, status, mfr_sales_30d AS `30daymfrsales`, scraping_status, claimed_by, claimed_at, last_attempt, error_message, created_at, updated_at, color, bed_size_measure, mattress_size
+            SELECT product_id, web_id, name, sku AS mpn_sku, gtin, brand, product_type AS category, keyword, url, osb_url, status, mfr_sales_30d AS `30daymfrsales`, scraping_status, claimed_by, claimed_at, last_attempt, error_message, created_at, updated_at, color, bed_size_measure, mattress_size, grouping_attr_1_value, grouping_attr_2_value
             FROM osb_products 
             WHERE scraping_status = 'pending' AND status = 1
             ORDER BY mfr_sales_30d DESC, product_id ASC
@@ -3461,6 +3482,8 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url):
         'best_price_url': best_price_url or "",
         'last_response': f'Completed - OSB Position: {osb_position}, Total Sellers: {seller_count}'
     })
+    if seller_count == 0:
+        result['product_url'] = ""
     return result
 
 def try_click_product(driver, cid):
@@ -3593,22 +3616,24 @@ def run_product_selection_phase(driver, product_id, phase_name, search_url, base
     return fallback_result or dict(base_result), False
 
 def get_existing_product_url_from_db(product_id):
-    """Retrieve existing valid product_url from google_shopping_results if available."""
+    """Retrieve existing valid product_url from google_shopping_results if available and OSB URL Match is 'Yes'."""
     conn = None
     cursor = None
     try:
         conn = _get_pg_conn()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT google_seller_page_url FROM google_shopping_results WHERE product_id = %s",
+            "SELECT google_seller_page_url, osb_url_match FROM google_shopping_results WHERE product_id = %s",
             (str(product_id),)
         )
         row = cursor.fetchone()
         if row and row[0]:
             p_url = row[0].strip()
-            is_valid_url = p_url.startswith("https://www.google.com/search?ibp=oshop") or p_url.startswith("https://share.google/")
-            if is_valid_url:
-                return p_url
+            osb_match = str(row[1] or '').strip()
+            if osb_match == 'Yes':
+                is_valid_url = p_url.startswith("https://www.google.com/search?ibp=oshop") or p_url.startswith("https://share.google/")
+                if is_valid_url:
+                    return p_url
         return None
     except Exception as e:
         print(f"Error fetching existing product_url from DB for {product_id}: {e}")
@@ -4036,8 +4061,8 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                             name=name,
                             mpn=mpnsku,
                             color=row.get('color'),
-                            bed_size_measure=row.get('bed_size_measure'),
-                            mattress_size=row.get('mattress_size')
+                            grouping_attr_1_value=row.get('grouping_attr_1_value'),
+                            grouping_attr_2_value=row.get('grouping_attr_2_value')
                         )
                         print(f"[Thread {thread_id} - URL regenerated] {url}")
 
@@ -4047,8 +4072,8 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                             name=name,
                             mpn=mpnsku,
                             color=row.get('color'),
-                            bed_size_measure=row.get('bed_size_measure'),
-                            mattress_size=row.get('mattress_size')
+                            grouping_attr_1_value=row.get('grouping_attr_1_value'),
+                            grouping_attr_2_value=row.get('grouping_attr_2_value')
                         )
                     
                     print(f"\n[Thread {thread_id}] Processing {index+1}/{len(df)}: Product ID {product_id}")
@@ -4348,7 +4373,7 @@ def main():
     parser.add_argument('--max-runtime-hours', type=float, default=_env_float("MAX_RUNTIME_HOURS", DEFAULT_MAX_RUNTIME_HOURS), help='Maximum hours this worker should process')
     parser.add_argument('--claim-ttl-minutes', type=int, default=_env_int("CLAIM_TTL_MINUTES", None), help='Release claims older than this TTL')
     parser.add_argument('--worker-id', type=str, default=os.environ.get("SCRAPER_WORKER_ID", None), help='Worker identifier stored in DB claims')
-    parser.add_argument('--max-workers', type=int, default=_env_int("MAX_WORKERS", 2), help='Number of parallel worker threads inside this chunk (default: 1, sequential)')
+    parser.add_argument('--max-workers', type=int, default=_env_int("MAX_WORKERS", 1), help='Number of parallel worker threads inside this chunk (default: 1, sequential)')
     parser.add_argument('--start-sales', type=str, default=None, help='Start sales boundary for this account partition')
     parser.add_argument('--start-id', type=str, default=None, help='Start product ID boundary for this account partition')
     parser.add_argument('--end-sales', type=str, default=None, help='End sales boundary for this account partition')
@@ -4369,6 +4394,7 @@ def main():
     
     # Handlers for dedicated utility commands
     if args.reset_errors:
+        reset_error_products_to_pending()
         reset_invalid_url_products_for_retry()
         sys.exit(0)
         
@@ -4385,9 +4411,9 @@ def main():
     # If this is the first chunk, automatically reset previous error products and invalid URL products to pending so they are retried in this run
     # REMOVED: chunk 1 automatic reset to avoid race conditions and infinite loops in concurrent/multi-account environments.
     # Error resets are now triggered once at the start of the workflow run via the workflow dispatch input.
-    # if args.chunk_id == 1:
-    #     reset_error_products_to_pending()
-    #     reset_invalid_url_products_for_retry()
+    if args.chunk_id == 1:
+        reset_error_products_to_pending()
+        reset_invalid_url_products_for_retry()
     
     # Release expired claims before checking queue size to ensure stale rows are recycled
     release_expired_claims(ttl_minutes=args.claim_ttl_minutes)
