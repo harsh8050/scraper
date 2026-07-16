@@ -10,3 +10,4 @@ google-shopping/
 __pycache__/
 *.DS_Store
 .vscode/
+config/accounts_config.json
