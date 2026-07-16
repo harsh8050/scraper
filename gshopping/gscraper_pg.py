@@ -3543,9 +3543,10 @@ def attempt_selected_product(driver, base_result, product_meta, osb_url):
         attempt_result['last_response'] = f'No offers found: {str(exc)}'
         return attempt_result
 
-def run_product_selection_phase(driver, product_id, phase_name, search_url, base_result, osb_url, fallback_first=False):
+def run_product_selection_phase(driver, product_id, phase_name, search_url, base_result, osb_url, fallback_first=False, skip_navigation=False):
     log_matching(product_id, f"{phase_name} started")
-    driver.get(search_url)
+    if not skip_navigation:
+        driver.get(search_url)
     try:
         wait_for_product_container(driver, timeout=10)
         time.sleep(random.uniform(1.5, 2.5))
@@ -3832,20 +3833,13 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
             result = initialize_product_result(product_id, keyword, search_url)
             
             phase_result, matched = run_product_selection_phase(
-                driver, product_id, phase_name, search_url, result, osb_url
+                driver, product_id, phase_name, search_url, result, osb_url, skip_navigation=True
             )
             last_result = phase_result
             if matched:
                 return phase_result
             
             # Fallback to first matching product on page if not fully matched in standard mode
-            try:
-                driver.get(search_url)
-                wait_for_product_container(driver, timeout=10)
-                time.sleep(random.uniform(1.0, 2.0))
-            except Exception:
-                pass
-                
             fallback_result, _ = run_product_selection_phase(
                 driver, product_id, f"{phase_name} fallback", search_url, result, osb_url, fallback_first=True
             )
