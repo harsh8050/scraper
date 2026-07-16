@@ -298,6 +298,8 @@ def scrape_product_for_meta(driver, meta, search_url, start_offset=0, processed_
                 "last_response": f"Completed - OSB Position: {osb_position}, Total Sellers: {len(sellers)}",
             }
         )
+        if len(sellers) == 0:
+            result["product_url"] = ""
         return result, next_offset
     except Exception as e:
         result["status"] = "error"

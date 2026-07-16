@@ -998,6 +998,8 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url):
         'osb_url_match': f'{"Yes" if osb_url_match else "No"}',
         'last_response': f'Completed - OSB Position: {osb_position}, Total Sellers: {seller_count}'
     })
+    if seller_count == 0:
+        result['product_url'] = ""
     return result
 
 def try_click_product(driver, cid):
