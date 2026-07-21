@@ -108,11 +108,8 @@ def build_keyword(name, mpn=None, color=None, bed_size_measure=None, mattress_si
     """
     Build the plain-text search keyword — mirrors the SQL `keyword` column:
       1stopbedrooms {name} "{mpn}" "{color}" "{bed_size_measure}" "{mattress_size}"
-    
-    If grouping attributes are provided, uses:
-      1stopbedrooms {{product name}} {{mpn}} {{first attribute value (if not available then color)}} {{second attribute value}}
     """
-    # --- Existing Logic ---
+
     parts = ['1stopbedrooms', _decode_html_entities(name)]
     if mpn and str(mpn).strip():
         parts.append(f'"{str(mpn).strip()}"')
@@ -122,22 +119,6 @@ def build_keyword(name, mpn=None, color=None, bed_size_measure=None, mattress_si
         parts.append(f'"{str(bed_size_measure).strip()}"')
     if mattress_size and str(mattress_size).strip():
         parts.append(f'"{str(mattress_size).strip()}"')
-        
-    # --- New Logic Added Below ---
-    if grouping_attr_1_value is not None or grouping_attr_2_value is not None:
-        parts = ['1stopbedrooms', _decode_html_entities(name)]
-        if mpn and str(mpn).strip():
-            parts.append(f'"{str(mpn).strip()}"')
-        
-        first_attr = grouping_attr_1_value
-        if not first_attr or not str(first_attr).strip():
-            first_attr = color
-            
-        if first_attr and str(first_attr).strip():
-            parts.append(f'"{str(first_attr).strip()}"')
-            
-        if grouping_attr_2_value and str(grouping_attr_2_value).strip():
-            parts.append(f'"{str(grouping_attr_2_value).strip()}"')
             
     return ' '.join(parts)
 
@@ -2248,7 +2229,7 @@ PRODUCT_FINAL_COLUMNS = [
     "best_price_url",
     "popular_url"
 ]
-# Import the existing captcha solving functions
+# Import the existing captcha solving functions (audio solver fallback)
 try:
     from solvecaptcha import solve_recaptcha_audio
 except ImportError:
@@ -2268,6 +2249,15 @@ except ImportError:
         def solve_recaptcha_audio(driver):
             print("Captcha solving module not available. Please install solvecaptcha.")
             return "failed"
+
+
+# ─── Human-like delay helper ───
+def _human_delay(mean=None, std=None, minimum=5):
+    """Sleep for a Gaussian-distributed duration to mimic human behavior."""
+    delay_mean = mean if mean is not None else _env_float("SCRAPE_DELAY_MEAN", 7.0)
+    delay_std = std if std is not None else _env_float("SCRAPE_DELAY_STD", 2.0)
+    delay = max(minimum, random.gauss(delay_mean, delay_std))
+    time.sleep(delay)
 
 def parse_platform_from_user_agent(user_agent):
     ua = (user_agent or "").lower()
@@ -2400,22 +2390,45 @@ def warm_google_session(driver):
         time.sleep(random.uniform(2.0, 3.5))
         accept_google_consent_if_present(driver)
 
+        # Perform a warm-up search with a random query to build session trust
+        _warmup_queries = [
+            "furniture", "home decor", "bedroom sets", "living room furniture",
+            "dining table sets", "office desk", "sofa sectional", "mattress king size",
+        ]
+        warmup_query = random.choice(_warmup_queries)
+        
         try:
             search_box = WebDriverWait(driver, 5).until(
                 EC.presence_of_element_located((By.NAME, "q"))
             )
             search_box.click()
             time.sleep(random.uniform(0.4, 0.9))
-            search_box.send_keys("furniture")
+            # Type characters with random delays to mimic human typing
+            for char in warmup_query:
+                search_box.send_keys(char)
+                time.sleep(random.uniform(0.03, 0.12))
             time.sleep(random.uniform(0.3, 0.7))
             search_box.send_keys(Keys.ENTER)
             time.sleep(random.uniform(2.0, 3.5))
         except Exception:
             pass
 
+        # Multiple scroll interactions
         try:
             driver.execute_script("window.scrollBy(0, Math.max(300, window.innerHeight * 0.35));")
             time.sleep(random.uniform(0.8, 1.4))
+            driver.execute_script("window.scrollBy(0, Math.max(200, window.innerHeight * 0.25));")
+            time.sleep(random.uniform(0.5, 1.0))
+        except Exception:
+            pass
+        
+        # Occasionally move mouse to a random position (if ActionChains is available)
+        try:
+            body = driver.find_element(By.TAG_NAME, "body")
+            actions = ActionChains(driver)
+            actions.move_to_element_with_offset(body, random.randint(100, 500), random.randint(100, 400))
+            actions.perform()
+            time.sleep(random.uniform(0.3, 0.8))
         except Exception:
             pass
     except Exception as exc:
@@ -2599,32 +2612,37 @@ def detects_recaptcha(driver):
 # In your main gscrapperci.py, update the handle_captcha function:
 
 def handle_captcha(driver, url):
-    """Handle captcha if detected with retry logic"""
-    max_retries = 1
+    """Handle captcha if detected with retry logic using the local audio solver fallback (solvecaptcha.py).
+    
+    Env vars:
+        CAPTCHA_MAX_RETRIES: Number of solve attempts before giving up (default: 2)
+    """
+    max_retries = _env_int("CAPTCHA_MAX_RETRIES", 2)
 
     for attempt in range(max_retries):
         recaptcha = detects_recaptcha(driver)
         if recaptcha:
             print(f"Attempt {attempt + 1}/{max_retries} to solve captcha...")
-            result = solve_recaptcha_audio(driver)
             
+            # Local audio solver
+            result = solve_recaptcha_audio(driver)
             if result == "solved":
-                print("Captcha solved successfully!")
+                print("✓ Captcha solved via audio!")
                 driver.switch_to.default_content()
                 return "solved"
             else:
                 print(f"Captcha solving attempt {attempt + 1} failed")
                 
-                # if attempt < max_retries - 1:
-                #     # Try refreshing the page
-                #     print("Refreshing page and retrying...")
-                #     driver.refresh()
-                #     time.sleep(5)
-                # else:
-                #     print("All captcha solving attempts failed")
-                #     return "failed"
-                print("All captcha solving attempts failed")
-                return "failed"
+                # Backoff before retrying (if not last attempt)
+                if attempt < max_retries - 1:
+                    backoff = (attempt + 1) * 10 + random.uniform(2, 8)
+                    print(f"Waiting {backoff:.0f}s before CAPTCHA retry...")
+                    time.sleep(backoff)
+                    driver.refresh()
+                    time.sleep(random.uniform(3, 5))
+                else:
+                    print("All captcha solving attempts failed")
+                    return "failed"
         else:
             print("No reCAPTCHA found.")
             return "no_captcha"
@@ -3165,6 +3183,15 @@ def extract_product_card_meta(product):
         'cid': cid,
     }
 
+def get_card_key(meta):
+    """Generate a unique key for a product card to prevent re-checking across search phases."""
+    cid = (meta.get('cid') or '').strip()
+    if cid:
+        return f"cid:{cid}"
+    pname = (meta.get('product_name') or '').strip().lower()
+    seller = (meta.get('seller') or '').strip().lower()
+    return f"name:{pname}|seller:{seller}"
+
 def extract_share_url(driver):
     share_url = ""
     try:
@@ -3543,7 +3570,10 @@ def attempt_selected_product(driver, base_result, product_meta, osb_url):
         attempt_result['last_response'] = f'No offers found: {str(exc)}'
         return attempt_result
 
-def run_product_selection_phase(driver, product_id, phase_name, search_url, base_result, osb_url, fallback_first=False, skip_navigation=False):
+def run_product_selection_phase(driver, product_id, phase_name, search_url, base_result, osb_url, fallback_first=False, skip_navigation=False, max_tries=5, checked_products=None):
+    if checked_products is None:
+        checked_products = set()
+
     log_matching(product_id, f"{phase_name} started")
     if not skip_navigation:
         driver.get(search_url)
@@ -3566,14 +3596,21 @@ def run_product_selection_phase(driver, product_id, phase_name, search_url, base
         phase_result['last_response'] = 'No products found in container'
         return phase_result, False
 
-    limit = min(MAX_PRODUCT_TRIES, len(products))
-    log_matching(product_id, f"Found {len(products)} products -> trying {limit if len(products) >= MAX_PRODUCT_TRIES else 'all'}")
-
     matching_products = []
     for product in products:
         meta = extract_product_card_meta(product)
+        card_key = get_card_key(meta)
+        
+        # Skip products already checked in previous search phases
+        if card_key in checked_products:
+            continue
+
         if fallback_first or product_matches_keyword(meta.get('product_name', ''), base_result['keyword']):
+            meta['_card_key'] = card_key
             matching_products.append(meta)
+
+    limit = min(max_tries, len(matching_products))
+    log_matching(product_id, f"Found {len(products)} products -> {len(matching_products)} unchecked matching -> trying {limit}")
 
     if fallback_first:
         matching_products = matching_products[:1]
@@ -3589,6 +3626,10 @@ def run_product_selection_phase(driver, product_id, phase_name, search_url, base
 
     fallback_result = None
     for index, product_meta in enumerate(matching_products, start=1):
+        card_key = product_meta.get('_card_key')
+        if card_key:
+            checked_products.add(card_key)
+
         log_matching(product_id, f"Trying product {index}")
         attempt_result = attempt_selected_product(driver, base_result, product_meta, osb_url)
         attempt_result['url'] = search_url
@@ -3700,7 +3741,7 @@ def scrape_product_directly(driver, product_id, keyword, product_url, osb_url=""
             })
             return result
         
-        time.sleep(random.uniform(4, 8))
+        _human_delay(mean=6, std=2, minimum=3)
         
         # Initialize result structure
         result = initialize_product_result(product_id, keyword, product_url)
@@ -3793,23 +3834,31 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
             print(f"Cached URL failed with status '{status_lower}'. Resetting cached URL and falling back to search flow.")
             reset_cached_product_url(product_id)
 
-    # 2. Search Flow (Retry sequence)
+    # 2. Search Flow (Retry sequence with custom ordering & limits)
     last_result = None
+    checked_products = set()
     
-    # Define retry attempts
-    attempts = [
-        ("Original search", url),
-    ]
+    attempts = []
+    seen_urls = set()
     
+    # 1. "Without 1stopbedrooms prefix" - check 5 first
     retry_url = build_retry_search_url(url)
-    if retry_url != url:
-        attempts.append(("Without 1stopbedrooms prefix", retry_url))
+    if retry_url:
+        attempts.append(("Without 1stopbedrooms prefix", retry_url, 5))
+        seen_urls.add(retry_url)
         
+    # 2. "Without 1stopbedrooms/color/part" - ignore above checked products, check remaining 3
     fallback_url = build_fallback_search_url(name, bed_size_measure, mattress_size)
-    if fallback_url:
-        attempts.append(("Without 1stopbedrooms/color/part", fallback_url))
+    if fallback_url and fallback_url not in seen_urls:
+        attempts.append(("Without 1stopbedrooms/color/part", fallback_url, 3))
+        seen_urls.add(fallback_url)
 
-    for phase_name, search_url in attempts:
+    # 3. "Original search" (with 1stopbedrooms) - ignore above checked products, check remaining 3
+    if url and url not in seen_urls:
+        attempts.append(("Original search", url, 3))
+        seen_urls.add(url)
+
+    for phase_name, search_url, max_tries in attempts:
         try:
             print(f"\n[PID {os.getpid()}] Scraper Phase: {phase_name}")
             print(f"Search URL: {search_url}")
@@ -3827,13 +3876,14 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
                 last_result = result
                 continue
             
-            time.sleep(random.uniform(4, 8))
+            _human_delay(mean=6, std=2, minimum=3)
             
             # Initialize result structure
             result = initialize_product_result(product_id, keyword, search_url)
             
             phase_result, matched = run_product_selection_phase(
-                driver, product_id, phase_name, search_url, result, osb_url, skip_navigation=True
+                driver, product_id, phase_name, search_url, result, osb_url,
+                skip_navigation=True, max_tries=max_tries, checked_products=checked_products
             )
             last_result = phase_result
             if matched:
@@ -3841,7 +3891,8 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
             
             # Fallback to first matching product on page if not fully matched in standard mode
             fallback_result, _ = run_product_selection_phase(
-                driver, product_id, f"{phase_name} fallback", search_url, result, osb_url, fallback_first=True
+                driver, product_id, f"{phase_name} fallback", search_url, result, osb_url,
+                fallback_first=True, skip_navigation=True, max_tries=1, checked_products=checked_products
             )
             if fallback_result.get('status') in {'completed', 'product_found', 'product_not_clickable', 'no_offers_found'}:
                 return fallback_result
@@ -3967,6 +4018,7 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
             product_queue.put((idx, row))
             
         consecutive_timeouts_map = {} # thread_id -> count
+        captcha_failures_map = {}     # thread_id -> consecutive captcha failure count
 
         # Database batch writer queue and configuration
         db_queue = queue.Queue()
@@ -4139,16 +4191,47 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                         consecutive_timeouts_map[thread_id] = 0
 
                     if status_lower == 'captcha_failed':
-                        print(f"[Thread {thread_id}] !!! CAPTCHA DETECTED on Product {product_id}. Stopping all threads in this chunk.")
-                        stop_event.set()
-                        break
-                    elif consecutive_timeouts_map.get(thread_id, 0) >= 2:
+                        captcha_failures = captcha_failures_map.get(thread_id, 0) + 1
+                        captcha_failures_map[thread_id] = captcha_failures
+                        max_captcha_thread_retries = _env_int("CAPTCHA_THREAD_MAX_RETRIES", 3)
+                        
+                        if captcha_failures >= max_captcha_thread_retries:
+                            print(f"[Thread {thread_id}] !!! {captcha_failures} consecutive CAPTCHA failures on Product {product_id}. Stopping all threads in this chunk.")
+                            stop_event.set()
+                            break
+                        
+                        # Graceful recovery: restart driver with new proxy/session
+                        print(f"[Thread {thread_id}] CAPTCHA on Product {product_id} ({captcha_failures}/{max_captcha_thread_retries}). Restarting driver...")
+                        try:
+                            driver.quit()
+                        except Exception:
+                            pass
+                        
+                        backoff = 30 * (2 ** (captcha_failures - 1)) + random.uniform(5, 15)
+                        print(f"[Thread {thread_id}] Waiting {backoff:.0f}s before retry with new driver...")
+                        time.sleep(backoff)
+                        
+                        try:
+                            driver = setup_driver(max_attempts=3, base_delay=5)
+                        except Exception as e:
+                            print(f"[Thread {thread_id}] Driver restart failed after CAPTCHA: {e}")
+                            stop_event.set()
+                            break
+                        
+                        # Re-queue the failed product for retry
+                        product_queue.put((index, row))
+                        continue
+                    elif status_lower not in ('captcha_failed',):
+                        # Reset captcha failure counter on any non-captcha result
+                        captcha_failures_map[thread_id] = 0
+                    
+                    if consecutive_timeouts_map.get(thread_id, 0) >= 2:
                         print(f"[Thread {thread_id}] !!! TIMEOUT PERSISTS on Product {product_id}. Stopping all threads in this chunk.")
                         stop_event.set()
                         break
                     
-                    # Sleep between products
-                    time.sleep(random.uniform(1, 3))
+                    # Human-like delay between products
+                    _human_delay()
             finally:
                 try:
                     if driver:
