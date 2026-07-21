@@ -554,11 +554,11 @@ def main():
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             print(f"Compressing File 1 into ZIP...")
             with zipf.open(file1_name, 'w') as f1:
-                df1.to_csv(f1, index=False, line_terminator='\n')
+                df1.to_csv(f1, index=False, lineterminator='\n')
                 
             print(f"Compressing File 2 into ZIP...")
             with zipf.open(file2_name, 'w') as f2:
-                df2.to_csv(f2, index=False, line_terminator='\n')
+                df2.to_csv(f2, index=False, lineterminator='\n')
                 
         print(f"✓ ZIP archive successfully completed at: {zip_path}")
     except Exception as e:
