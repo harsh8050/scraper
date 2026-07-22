@@ -3134,13 +3134,28 @@ def log_matching(product_id, message):
     print(f"[PID {os.getpid()}] {message}")
 
 def wait_for_product_container(driver, timeout=10):
-    return WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.CLASS_NAME, "dURPMd"))
-    )
+    container_xpaths = [
+        "//div[contains(@class,'dURPMd')]",
+        "//div[contains(@class,'sh-pr__product-results')]",
+        "//div[contains(@class,'MtXiu')]",
+        "//div[@data-docid]"
+    ]
+    def container_found(d):
+        for xp in container_xpaths:
+            els = d.find_elements(By.XPATH, xp)
+            if len(els) > 0:
+                return els[0]
+        return False
+
+    return WebDriverWait(driver, timeout).until(container_found)
 
 def get_visible_product_cards(driver):
-    mains = wait_for_product_container(driver, timeout=10)
-    return mains.find_elements(By.CLASS_NAME, "MtXiu")
+    cards = driver.find_elements(By.XPATH, "//div[contains(@class,'MtXiu')]")
+    if not cards:
+        cards = driver.find_elements(By.XPATH, "//div[contains(@class,'sh-dlr__list-result')]")
+    if not cards:
+        cards = driver.find_elements(By.XPATH, "//div[@data-docid]")
+    return cards
 
 def product_matches_keyword(product_name, keyword):
     normalized_keyword = re.sub(r'\bset\s+of\b', '', keyword or '', flags=re.IGNORECASE)
