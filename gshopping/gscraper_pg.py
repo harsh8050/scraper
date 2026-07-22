@@ -2969,18 +2969,34 @@ def get_product_about_info(driver):
         try:
             js_attributes = driver.execute_script("""
                 const attrs = {};
-                const keys = document.querySelectorAll(".TCzUld, div[class*='TCzUld']");
+                const keys = document.querySelectorAll(".TCzUld, [class*='TCzUld'], [role='rowheader']");
                 keys.forEach(k => {
-                    const row = k.closest(".YU1Fsb, [role='row']") || k.parentElement;
+                    const row = k.closest(".YU1Fsb, [role='row'], tr") || k.parentElement;
+                    let val = null;
                     if (row) {
-                        const val = row.querySelector(".uAwmIf");
-                        if (val) {
-                            const kt = k.innerText ? k.innerText.trim() : "";
-                            const vt = val.innerText ? val.innerText.trim() : "";
-                            if (kt && vt) attrs[kt] = vt;
-                        }
+                        val = row.querySelector(".uAwmIf, [class*='uAwmIf'], [role='gridcell'], td:nth-child(2)");
+                    }
+                    if (!val && k.nextElementSibling) {
+                        val = k.nextElementSibling;
+                    }
+                    if (val) {
+                        const kt = k.innerText ? k.innerText.trim() : "";
+                        const vt = val.innerText ? val.innerText.trim() : "";
+                        if (kt && vt && kt !== vt) attrs[kt] = vt;
                     }
                 });
+
+                if (Object.keys(attrs).length === 0) {
+                    const tableRows = document.querySelectorAll("div.HhYL2b tr, div.HhYL2b div[role='row'], div[jsname='HhYL2b'] div[role='row']");
+                    tableRows.forEach(r => {
+                        const cells = r.querySelectorAll("td, div[role='gridcell'], div[role='rowheader'], div");
+                        if (cells.length >= 2) {
+                            const kt = cells[0].innerText ? cells[0].innerText.trim() : "";
+                            const vt = cells[1].innerText ? cells[1].innerText.trim() : "";
+                            if (kt && vt && kt.length < 50 && kt !== vt) attrs[kt] = vt;
+                        }
+                    });
+                }
                 return attrs;
             """)
             if js_attributes and isinstance(js_attributes, dict):
