@@ -84,7 +84,6 @@ jobs:
         run: pip install pymysql cryptography pandas
 
       - name: Reset errors if requested
-        if: ${{ (github.event.inputs.reset_errors == 'true') && (github.event.inputs.run_depth == '1' || github.event.inputs.run_depth == '') }}
         env:
           MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
           MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
