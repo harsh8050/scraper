@@ -130,7 +130,7 @@ jobs:
             wget gnupg ca-certificates unzip xvfb libxss1 libappindicator3-1 \
             libindicator7 libnss3 libnspr4 libatk-bridge2.0-0 libgtk-3-0 \
             libx11-xcb1 libxcomposite1 libxrandr2 libgbm1 libasound2 \
-            fonts-liberation libu2f-udev
+            fonts-liberation libu2f-udev ffmpeg
 
       - name: Download fixed Google Chrome 146
         run: |
@@ -175,7 +175,9 @@ jobs:
             pymysql==1.1.0 \
             cryptography \
             SQLAlchemy==2.0.25 \
-            python-dotenv
+            python-dotenv \
+            pydub==0.25.1 \
+            SpeechRecognition==3.10.1
 
       - name: Run scraper worker directly to MySQL
         env:
