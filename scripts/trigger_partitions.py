@@ -148,6 +148,39 @@ def trigger_workflow(account_config, start_sales, start_id, end_sales, end_id):
         print(f"\u2717 Failed to trigger {account_config['name']}: {response.status_code} - {response.text}")
         return False
 
+def sync_fork(account_config):
+    owner = account_config["owner"]
+    repo = account_config["repo"]
+    ref = account_config.get("ref", "main")
+    token = account_config["token"]
+    
+    url = f"https://api.github.com/repos/{owner}/{repo}/merge-upstream"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    payload = {
+        "branch": ref
+    }
+    
+    try:
+        print(f"Syncing fork for {account_config['name']} ({owner}/{repo}:{ref})...")
+        response = requests.post(url, headers=headers, json=payload)
+        if response.status_code == 200:
+            data = response.json()
+            print(f"✓ Successfully synced fork for {account_config['name']}: {data.get('message', 'OK')}")
+            return True
+        elif response.status_code in (409, 422):
+            print(f"ℹ Fork {account_config['name']} ({owner}/{repo}): {response.status_code} - {response.json().get('message', response.text)}")
+            return True
+        else:
+            print(f"✗ Failed to sync fork for {account_config['name']}: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        print(f"Error syncing fork for {account_config['name']}: {e}")
+        return False
+
 def main():
     config_path = "config/accounts_config.json"
     if not os.path.exists(config_path):
@@ -157,13 +190,13 @@ def main():
     with open(config_path, "r") as f:
         accounts = json.load(f)
         
-    # First, cancel active runs for all accounts
-    print("Stopping active workflow runs across all accounts...")
+    # Sync forks across all configured accounts
+    print("Syncing forks across all accounts...")
     for acc_id in sorted(accounts.keys()):
-        cancel_active_runs(accounts[acc_id])
-        
-    # Wait a few seconds to let cancellation propagate
-    print("Waiting 5 seconds for cancellations to propagate...")
+        sync_fork(accounts[acc_id])
+
+    # Wait a few seconds after sync
+    print("Waiting 5 seconds after fork sync...")
     time.sleep(5)
         
     try:
