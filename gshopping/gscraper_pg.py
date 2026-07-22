@@ -2631,18 +2631,8 @@ def handle_captcha(driver, url):
                 driver.switch_to.default_content()
                 return "solved"
             else:
-                print(f"Captcha solving attempt {attempt + 1} failed")
-                
-                # Backoff before retrying (if not last attempt)
-                if attempt < max_retries - 1:
-                    backoff = (attempt + 1) * 10 + random.uniform(2, 8)
-                    print(f"Waiting {backoff:.0f}s before CAPTCHA retry...")
-                    time.sleep(backoff)
-                    driver.refresh()
-                    time.sleep(random.uniform(3, 5))
-                else:
-                    print("All captcha solving attempts failed")
-                    return "failed"
+                print("Captcha solving failed. Skipping product execution immediately.")
+                return "failed"
         else:
             print("No reCAPTCHA found.")
             return "no_captcha"
@@ -3873,8 +3863,8 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
                     'last_response': 'Captcha solving failed',
                     'status': 'captcha_failed'
                 })
-                last_result = result
-                continue
+                # Immediately return on CAPTCHA to skip remaining phases on blocked driver
+                return result
             
             _human_delay(mean=3, std=1, minimum=2)
             
@@ -4198,33 +4188,29 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                     if status_lower == 'captcha_failed':
                         captcha_failures = captcha_failures_map.get(thread_id, 0) + 1
                         captcha_failures_map[thread_id] = captcha_failures
-                        max_captcha_thread_retries = _env_int("CAPTCHA_THREAD_MAX_RETRIES", 5)
+                        max_captcha_thread_retries = _env_int("CAPTCHA_THREAD_MAX_RETRIES", 10)
                         
                         if captcha_failures >= max_captcha_thread_retries:
-                            print(f"[Thread {thread_id}] !!! {captcha_failures} consecutive CAPTCHA failures on Product {product_id}. Stopping THIS thread (other threads continue).")
-                            # Only stop this thread, not all threads — other workers may still be healthy
+                            print(f"[Thread {thread_id}] !!! {captcha_failures} consecutive CAPTCHA failures. Stopping THIS thread.")
                             break
                         
-                        # Graceful recovery: restart driver with new session
-                        print(f"[Thread {thread_id}] CAPTCHA on Product {product_id} ({captcha_failures}/{max_captcha_thread_retries}). Restarting driver...")
+                        # Release product back to pending so another clean session can retry it
+                        release_claimed_products([product_id], resolved_worker_id, reason="captcha_failed")
+                        
+                        print(f"[Thread {thread_id}] CAPTCHA on Product {product_id}. Skipping execution, restarting driver with fresh session, and trying next product...")
                         try:
                             driver.quit()
                         except Exception:
                             pass
                         
-                        backoff = 30 * (2 ** (captcha_failures - 1)) + random.uniform(5, 15)
-                        print(f"[Thread {thread_id}] Waiting {backoff:.0f}s before retry with new driver...")
-                        time.sleep(backoff)
+                        time.sleep(random.uniform(2, 4))
                         
                         try:
-                            driver = setup_driver(max_attempts=3, base_delay=5)
+                            driver = setup_driver(max_attempts=3, base_delay=3)
                         except Exception as e:
                             print(f"[Thread {thread_id}] Driver restart failed after CAPTCHA: {e}")
-                            # Only break this thread, let others continue
                             break
                         
-                        # Re-queue the failed product for retry
-                        product_queue.put((index, row))
                         continue
                     elif status_lower not in ('captcha_failed',):
                         # Reset captcha failure counter on any non-captcha result
@@ -4461,7 +4447,7 @@ def main():
     parser.add_argument('--max-runtime-hours', type=float, default=_env_float("MAX_RUNTIME_HOURS", DEFAULT_MAX_RUNTIME_HOURS), help='Maximum hours this worker should process')
     parser.add_argument('--claim-ttl-minutes', type=int, default=_env_int("CLAIM_TTL_MINUTES", None), help='Release claims older than this TTL')
     parser.add_argument('--worker-id', type=str, default=os.environ.get("SCRAPER_WORKER_ID", None), help='Worker identifier stored in DB claims')
-    parser.add_argument('--max-workers', type=int, default=_env_int("MAX_WORKERS", 1), help='Number of parallel worker threads inside this chunk (default: 1, sequential)')
+    parser.add_argument('--max-workers', type=int, default=_env_int("MAX_WORKERS", 2), help='Number of parallel worker threads inside this chunk (default: 1, sequential)')
     parser.add_argument('--start-sales', type=str, default=None, help='Start sales boundary for this account partition')
     parser.add_argument('--start-id', type=str, default=None, help='Start product ID boundary for this account partition')
     parser.add_argument('--end-sales', type=str, default=None, help='End sales boundary for this account partition')
