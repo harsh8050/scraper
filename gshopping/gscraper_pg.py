@@ -2948,25 +2948,35 @@ def get_product_about_info(driver):
 
         # Extract all attributes
         try:
-            # Find all attribute rows
-            attribute_rows = about_section.find_elements(By.XPATH, ".//div[@role='row' and contains(@class,'YU1Fsb')]") if about_section else driver.find_elements(By.XPATH, "//div[@role='row' and contains(@class,'YU1Fsb')]")
-            
-            for row in attribute_rows:
+            # Try locating attribute rows via parent row and direct TCzUld key containers
+            key_elements = driver.find_elements(By.XPATH, "//div[contains(@class,'TCzUld')]")
+            for key_el in key_elements:
                 try:
-                    # Get attribute name
-                    name_element = row.find_element(By.XPATH, ".//div[contains(@class,'TCzUld')]")
-                    attr_name = name_element.text.strip()
-                    
-                    # Get attribute value
-                    value_element = row.find_element(By.XPATH, ".//div[contains(@class,'uAwmIf')]//div")
-                    attr_value = value_element.text.strip()
-                    
-                    if attr_name and attr_value:
-                        product_info['attributes'][attr_name] = attr_value
-                        
-                except Exception as e:
+                    attr_name = key_el.text.strip()
+                    if not attr_name:
+                        continue
+                    # Value container is in the parent row
+                    row_el = key_el.find_element(By.XPATH, "./ancestor::div[contains(@class,'YU1Fsb') or @role='row']")
+                    val_el = row_el.find_element(By.XPATH, ".//div[contains(@class,'uAwmIf')]")
+                    attr_val = val_el.text.strip()
+                    if attr_name and attr_val:
+                        product_info['attributes'][attr_name] = attr_val
+                except Exception:
                     continue
-                    
+
+            # Fallback to standard row finder if key elements weren't found
+            if not product_info['attributes']:
+                attribute_rows = about_section.find_elements(By.XPATH, ".//div[@role='row' and contains(@class,'YU1Fsb')]") if about_section else driver.find_elements(By.XPATH, "//div[@role='row' and contains(@class,'YU1Fsb')]")
+                for row in attribute_rows:
+                    try:
+                        name_element = row.find_element(By.XPATH, ".//div[contains(@class,'TCzUld')]")
+                        attr_name = name_element.text.strip()
+                        value_element = row.find_element(By.XPATH, ".//div[contains(@class,'uAwmIf')]//div")
+                        attr_value = value_element.text.strip()
+                        if attr_name and attr_value:
+                            product_info['attributes'][attr_name] = attr_value
+                    except Exception:
+                        continue
         except Exception as e:
             print(f"Error extracting attributes: {str(e)}")
         
@@ -2976,8 +2986,7 @@ def get_product_about_info(driver):
         try:
             print("Attempting to extract all product images...")
             gallery_images = []
-            # 1. Standard img elements from typical containers
-            img_elements = driver.find_elements(By.XPATH, "//div[@jsname='HhYL2b']//img | //div[@jsname='SAt90e']//img | //div[contains(@class, 'm8U2Z')]//img | //div[@class='DqsAAd']//img | //div[contains(@class, 'FLY67')]//img | //div[contains(@class, 'sh-div__image-container')]//img | //img[@class='KfAt4d'] | //img[contains(@class, 'r429ob')]")
+            img_elements = driver.find_elements(By.XPATH, "//div[@jsname='HhYL2b']//img | //div[@jsname='SAt90e']//img | //div[contains(@class, 'm8U2Z')]//img | //div[contains(@class,'DqsAAd')]//img | //div[contains(@class, 'FLY67')]//img | //div[contains(@class, 'sh-div')]//img | //div[contains(@class, 'Asw3Oe')]//img | //img[@class='KfAt4d'] | //img[contains(@class, 'r429ob')]")
             for img in img_elements:
                 try:
                     src = img.get_attribute('srcset')
@@ -2986,16 +2995,12 @@ def get_product_about_info(driver):
                     if not src:
                         src = img.get_attribute('src')
                     if src and not src.startswith('data:') and src not in gallery_images:
-                        w = int(img.get_attribute('width') or 0)
-                        h = int(img.get_attribute('height') or 0)
-                        if (w > 0 and h > 0 and (w < 40 or h < 40)):
-                            continue
                         if any(pattern in src for pattern in ['gstatic.com', 'googleusercontent.com', 'google.com']):
                             gallery_images.append(src)
-                except:
+                except Exception:
                     continue
             
-            # 2. Carousel thumbnail div containers (class Asw3Oe) and any elements with data-src
+            # Carousel thumbnail containers and elements with data-src
             data_src_elements = driver.find_elements(By.XPATH, "//div[contains(@class, 'Asw3Oe')] | //*[@data-src]")
             for elem in data_src_elements:
                 try:
@@ -3003,7 +3008,7 @@ def get_product_about_info(driver):
                     if src and not src.startswith('data:') and src not in gallery_images:
                         if any(pattern in src for pattern in ['gstatic.com', 'googleusercontent.com', 'google.com']):
                             gallery_images.append(src)
-                except:
+                except Exception:
                     continue
 
             product_info['gs_images'] = gallery_images
