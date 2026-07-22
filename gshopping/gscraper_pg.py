@@ -2584,21 +2584,41 @@ def save_remaining_df(df, chunk_id, round_id, output_dir, reason=None):
     return csv3_path, len(df)
 
 def detects_recaptcha(driver):
-    """Detect if reCAPTCHA is present on the page"""
+    """Detect if reCAPTCHA is present on the page.
+
+    Checks:
+      1. Puzzle image CAPTCHA class (rc-imageselect-challenge)
+      2. iframe src containing 'recaptcha'
+      3. iframe title containing 'recaptcha' (covers Google Shopping inline widget
+         where title='reCAPTCHA' but src points to google.com/recaptcha/...)
+      4. Page body keywords ('unusual traffic', 'not a robot') for the
+         Google "About this page" unusual-traffic modal
+    """
     try:
+        # 1. Image puzzle
         if driver.find_elements(By.CLASS_NAME, "rc-imageselect-challenge"):
             print("Puzzle reCAPTCHA detected!")
             return True
-        iframe_sources = []
+
+        # 2 & 3. iframe src OR title
         for iframe in driver.find_elements(By.TAG_NAME, "iframe"):
             try:
-                iframe_sources.append((iframe.get_attribute("src") or "").lower())
+                src   = (iframe.get_attribute("src")   or "").lower()
+                title = (iframe.get_attribute("title") or "").lower()
+                if "recaptcha" in src or "recaptcha" in title or "captcha" in title:
+                    print(f"reCAPTCHA iframe detected! (src='{src[:60]}' title='{title}')")
+                    return True
             except StaleElementReferenceException:
                 continue
 
-        if any("recaptcha" in src for src in iframe_sources):
-            print("reCAPTCHA iframe detected!")
-            return True
+        # 4. Google "unusual traffic" page keywords in body text
+        try:
+            body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+            if any(kw in body_text for kw in ["unusual traffic", "not a robot", "i'm not a robot", "recaptcha"]):
+                print("Google unusual-traffic / reCAPTCHA page detected via body text!")
+                return True
+        except Exception:
+            pass
 
         print("No reCAPTCHA found.")
         return False
@@ -2619,24 +2639,34 @@ def handle_captcha(driver, url):
     """
     max_retries = _env_int("CAPTCHA_MAX_RETRIES", 2)
 
-    for attempt in range(max_retries):
+    recaptcha = detects_recaptcha(driver)
+    if not recaptcha:
+        # Brief pause to catch asynchronously appearing CAPTCHA overlays
+        time.sleep(1.2)
         recaptcha = detects_recaptcha(driver)
-        if recaptcha:
-            print(f"Attempt {attempt + 1}/{max_retries} to solve captcha...")
-            
-            # Local audio solver
-            result = solve_recaptcha_audio(driver)
-            if result == "solved":
-                print("✓ Captcha solved via audio!")
-                driver.switch_to.default_content()
-                return "solved"
-            else:
-                print("Captcha solving failed. Skipping product execution immediately.")
-                return "failed"
+
+    if not recaptcha:
+        return "no_captcha"
+
+    for attempt in range(max_retries):
+        print(f"Attempt {attempt + 1}/{max_retries} to solve captcha...")
+        
+        # Local audio solver
+        result = solve_recaptcha_audio(driver)
+        if result == "solved":
+            print("✓ Captcha solved via audio!")
+            driver.switch_to.default_content()
+            return "solved"
         else:
-            print("No reCAPTCHA found.")
-            return "no_captcha"
-    
+            print(f"Captcha solve attempt {attempt + 1} failed.")
+            time.sleep(2)
+            driver.switch_to.default_content()
+            if not detects_recaptcha(driver):
+                print("✓ Captcha no longer detected.")
+                return "solved"
+
+    print("All captcha solving attempts failed. Skipping product execution immediately.")
+    driver.switch_to.default_content()
     return "failed"
 
 def start_new_driver(search_url):
@@ -3167,32 +3197,84 @@ def product_matches_keyword(product_name, keyword):
     return has_set_word(normalized_product_name) == has_set_word(normalized_keyword)
 
 def extract_product_card_meta(product):
-    try:
-        product_name = product.find_element(By.XPATH, ".//div[contains(@class,'gkQHve')]").text
-    except Exception:
-        product_name = ""
+    # Try different selectors for product name
+    product_name = ""
+    for xpath in [
+        ".//div[contains(@class,'gkQHve')]",
+        ".//h3",
+        ".//a[not(contains(@href, 'support.google')) and not(contains(@href, 'google.com/support'))]"
+    ]:
+        try:
+            el = product.find_element(By.XPATH, xpath)
+            text = el.text.strip()
+            if text:
+                product_name = text
+                break
+        except Exception:
+            continue
 
-    try:
-        seller = product.find_element(By.XPATH, ".//span[contains(@class,'WJMUdc')]").text
-    except Exception:
-        seller = ""
+    # Try different selectors for seller / store info
+    seller = ""
+    for xpath in [
+        ".//span[contains(@class,'WJMUdc')]",
+        ".//div[contains(@class,'WJMUdc')]"
+    ]:
+        try:
+            el = product.find_element(By.XPATH, xpath)
+            text = el.text.strip()
+            if text:
+                seller = text
+                break
+        except Exception:
+            continue
 
+    # Extract cid or data-docid
+    cid = ""
     try:
-        cid = product.get_attribute('id')
+        docid = product.get_attribute('data-docid')
+        if docid:
+            cid = docid
     except Exception:
-        cid = ""
+        pass
+
+    if not cid:
+        try:
+            cid = product.get_attribute('id')
+        except Exception:
+            pass
+
+    # Extract product ID from any shopping links in the card
+    shopping_id = ""
+    try:
+        a_tags = product.find_elements(By.TAG_NAME, "a")
+        for a in a_tags:
+            href = a.get_attribute("href") or ""
+            if href:
+                # Matches patterns like /shopping/product/12345 or /shopping/product/12345/offers
+                match = re.search(r'/shopping/product/(\d+)', href)
+                if match:
+                    shopping_id = match.group(1)
+                    break
+    except Exception:
+        pass
 
     return {
         'product_name': product_name,
         'seller': seller,
         'cid': cid,
+        'shopping_id': shopping_id,
     }
 
 def get_card_key(meta):
     """Generate a unique key for a product card to prevent re-checking across search phases."""
+    shopping_id = (meta.get('shopping_id') or '').strip()
+    if shopping_id:
+        return f"shopping_id:{shopping_id}"
+        
     cid = (meta.get('cid') or '').strip()
     if cid:
         return f"cid:{cid}"
+        
     pname = (meta.get('product_name') or '').strip().lower()
     seller = (meta.get('seller') or '').strip().lower()
     return f"name:{pname}|seller:{seller}"
@@ -3713,6 +3795,15 @@ def run_product_selection_phase(driver, product_id, phase_name, search_url, base
 
     fallback_result = None
     for index, product_meta in enumerate(matching_products, start=1):
+        # Check if CAPTCHA popped up before trying each product card
+        captcha_res = handle_captcha(driver, search_url)
+        if captcha_res == "failed":
+            phase_result = dict(base_result)
+            phase_result['url'] = search_url
+            phase_result['status'] = 'captcha_failed'
+            phase_result['last_response'] = 'Captcha solving failed'
+            return phase_result, False
+
         card_key = product_meta.get('_card_key')
         if card_key:
             checked_products.add(card_key)
@@ -3934,15 +4025,15 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
         attempts.append(("Without 1stopbedrooms prefix", retry_url, 10))
         seen_urls.add(retry_url)
         
-    # 2. "Without 1stopbedrooms/color/part" - ignore above checked products, check remaining 10
+    # 2. "Without 1stopbedrooms/color/part" - ignore above checked products, check remaining 5
     fallback_url = build_fallback_search_url(name, bed_size_measure, mattress_size)
     if fallback_url and fallback_url not in seen_urls:
-        attempts.append(("Without 1stopbedrooms/color/part", fallback_url, 10))
+        attempts.append(("Without 1stopbedrooms/color/part", fallback_url, 5))
         seen_urls.add(fallback_url)
 
-    # 3. "Original search" (with 1stopbedrooms) - ignore above checked products, check remaining 10
+    # 3. "Original search" (with 1stopbedrooms) - ignore above checked products, check remaining 3
     if url and url not in seen_urls:
-        attempts.append(("Original search", url, 10))
+        attempts.append(("Original search", url, 3))
         seen_urls.add(url)
 
     for phase_name, search_url, max_tries in attempts:
