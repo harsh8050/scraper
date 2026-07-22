@@ -3274,51 +3274,78 @@ def get_card_key(meta):
 def extract_share_url(driver):
     share_url = ""
     try:
-        share_button = WebDriverWait(driver, PANEL_WAIT_SECONDS).until(
-            EC.element_to_be_clickable((
-                By.XPATH,
-                "//div[contains(@class,'RSNrZe') and @role='button' and @aria-label='Share']"
-            ))
-        )
+        # Try multiple selectors for Share button
+        share_button = None
+        share_button_finders = [
+            lambda: driver.find_element(By.XPATH, "//div[@role='button' and @aria-label='Share']"),
+            lambda: driver.find_element(By.XPATH, "//button[@aria-label='Share']"),
+            lambda: driver.find_element(By.XPATH, "//*[contains(@aria-label,'Share') and @role='button']"),
+            lambda: driver.find_element(By.XPATH, "//div[contains(@class,'RSNrZe') and @role='button']"),
+        ]
+        for finder in share_button_finders:
+            try:
+                share_button = finder()
+                if share_button:
+                    break
+            except:
+                continue
+
+        if not share_button:
+            print("Could not find Share button inside the panel.")
+            return ""
+
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", share_button)
-        share_button.click()
+        time.sleep(0.5)
 
-        share_dialog = WebDriverWait(driver, PANEL_WAIT_SECONDS).until(
-            EC.visibility_of_element_located((By.XPATH, "//div[@role='dialog' and @aria-label='Share']"))
-        )
-
+        # Click Share button
         try:
-            share_input = share_dialog.find_element(By.CSS_SELECTOR, "input[aria-label='Share link'][type='url']")
-            share_url = (share_input.get_attribute("value") or "").strip()
+            share_button.click()
         except Exception:
-            share_url = ""
+            driver.execute_script("arguments[0].click();", share_button)
+
+        # Wait for Share dialog to appear
+        share_dialog = WebDriverWait(driver, PANEL_WAIT_SECONDS).until(
+            EC.visibility_of_element_located((By.XPATH, "//div[@role='dialog' and (contains(@aria-label,'Share') or contains(.,'Share'))]"))
+        )
+        time.sleep(0.8)
+
+        # Extract share.google link
+        for selector in [
+            "span[jsname='zgnjS']",
+            "span.F6Q4e",
+            ".F6Q4e",
+            "[jsname='zgnjS']",
+            "div[jsname='tQ9n1c']"
+        ]:
+            try:
+                el = share_dialog.find_element(By.CSS_SELECTOR, selector)
+                txt = el.text.strip()
+                if txt.startswith("https://share.google/"):
+                    share_url = txt
+                    break
+            except Exception:
+                continue
 
         if not share_url:
-            for selector in [
-                "span[jsname='zgnjS']",
-                "span.F6Q4e",
-                ".F6Q4e",
-                "[jsname='zgnjS']",
-                "div[jsname='tQ9n1c']"
-            ]:
-                try:
-                    el = share_dialog.find_element(By.CSS_SELECTOR, selector)
-                    txt = el.text.strip()
-                    if txt.startswith("https://"):
-                        share_url = txt
-                        break
-                except Exception:
-                    continue
+            try:
+                el = share_dialog.find_element(By.XPATH, ".//*[contains(text(), 'share.google')]")
+                txt = el.text.strip()
+                if txt.startswith("https://"):
+                    share_url = txt
+            except Exception:
+                pass
 
+        # Close Share dialog
         try:
             close_button = share_dialog.find_element(By.CSS_SELECTOR, "[jsname='tqp7ud']")
             close_button.click()
         except Exception:
             try:
-                ActionChains(driver).send_keys(u'\ue00c').perform()  # ESC
+                ActionChains(driver).send_keys(Keys.ESCAPE).perform()
             except Exception:
                 pass
-    except Exception:
+    except Exception as e:
+        print(f"Error extracting share URL: {e}")
         share_url = ""
     return share_url
 
@@ -3559,14 +3586,11 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url, fa
     should_extract = (osb_position > 0) or fallback_first
     if should_extract:
         # Extract share URL only when we are collecting attributes/data
-        raw_url = (extract_share_url(driver) or driver.current_url or "").strip()
-        if raw_url.startswith("https://www.google.com/search?ibp=oshop") or raw_url.startswith("https://share.google/"):
-            result['product_url'] = raw_url
+        share_url = extract_share_url(driver).strip()
+        if share_url.startswith("https://share.google/"):
+            result['product_url'] = share_url
         else:
-            # Fallback to reconstructing the URL using the card's shopping_id or cid!
-            shop_id = result.get('shopping_id', '') or result.get('cid', '')
-            if shop_id:
-                result['product_url'] = f"https://www.google.com/search?ibp=oshop&docid={shop_id}"
+            result['product_url'] = ""
 
         try:
             about_data_json = get_product_about_info(driver)
