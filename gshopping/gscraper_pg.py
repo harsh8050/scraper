@@ -3907,15 +3907,15 @@ def scrape_product(driver, product_id, keyword, url, osb_url="", name="", mpn_sk
         attempts.append(("Without 1stopbedrooms prefix", retry_url, 10))
         seen_urls.add(retry_url)
         
-    # 2. "Without 1stopbedrooms/color/part" - ignore above checked products, check remaining 5
+    # 2. "Without 1stopbedrooms/color/part" - ignore above checked products, check remaining 10
     fallback_url = build_fallback_search_url(name, bed_size_measure, mattress_size)
     if fallback_url and fallback_url not in seen_urls:
-        attempts.append(("Without 1stopbedrooms/color/part", fallback_url, 5))
+        attempts.append(("Without 1stopbedrooms/color/part", fallback_url, 10))
         seen_urls.add(fallback_url)
 
-    # 3. "Original search" (with 1stopbedrooms) - ignore above checked products, check remaining 3
+    # 3. "Original search" (with 1stopbedrooms) - ignore above checked products, check remaining 10
     if url and url not in seen_urls:
-        attempts.append(("Original search", url, 3))
+        attempts.append(("Original search", url, 10))
         seen_urls.add(url)
 
     for phase_name, search_url, max_tries in attempts:
