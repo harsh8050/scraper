@@ -3273,29 +3273,30 @@ def get_card_key(meta):
 
 def extract_share_url(driver):
     share_url = ""
+    main_window = driver.current_window_handle
     try:
-        # Try multiple selectors for Share button
+        # Try multiple exact selectors for main product header Share button
         share_button = None
         share_button_finders = [
-            lambda: driver.find_element(By.XPATH, "//div[@role='button' and @aria-label='Share']"),
-            lambda: driver.find_element(By.XPATH, "//button[@aria-label='Share']"),
-            lambda: driver.find_element(By.XPATH, "//*[contains(@aria-label,'Share') and @role='button']"),
-            lambda: driver.find_element(By.XPATH, "//div[contains(@class,'RSNrZe') and @role='button']"),
+            lambda: driver.find_element(By.XPATH, "//div[@role='button' and (translate(@aria-label, 'SHARE', 'share')='share' or @aria-label='Share')]"),
+            lambda: driver.find_element(By.XPATH, "//button[translate(@aria-label, 'SHARE', 'share')='share' or @aria-label='Share']"),
+            lambda: driver.find_element(By.XPATH, "//div[@jsname='RSFNod']//div[@role='button' and @aria-label='Share']"),
+            lambda: driver.find_element(By.XPATH, "//div[contains(@class,'RSNrZe') and @role='button' and @aria-label='Share']"),
         ]
         for finder in share_button_finders:
             try:
                 share_button = finder()
-                if share_button:
+                if share_button and share_button.is_displayed():
                     break
-            except:
+            except Exception:
                 continue
 
         if not share_button:
-            print("Could not find Share button inside the panel.")
+            print("Could not find Share button inside the panel header.")
             return ""
 
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", share_button)
-        time.sleep(0.5)
+        time.sleep(0.4)
 
         # Click Share button
         try:
@@ -3303,8 +3304,18 @@ def extract_share_url(driver):
         except Exception:
             driver.execute_script("arguments[0].click();", share_button)
 
+        time.sleep(0.5)
+
+        # Close any accidentally opened new tab/window if a social link was clicked
+        if len(driver.window_handles) > 1:
+            for handle in driver.window_handles:
+                if handle != main_window:
+                    driver.switch_to.window(handle)
+                    driver.close()
+            driver.switch_to.window(main_window)
+
         # Wait for Share dialog to appear
-        share_dialog = WebDriverWait(driver, PANEL_WAIT_SECONDS).until(
+        share_dialog = WebDriverWait(driver, 5.0).until(
             EC.visibility_of_element_located((By.XPATH, "//div[@role='dialog' and (contains(@aria-label,'Share') or contains(.,'Share'))]"))
         )
 
