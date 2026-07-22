@@ -3518,26 +3518,58 @@ def try_click_product(driver, cid):
     last_error = None
     for click_attempt in range(PRODUCT_CLICK_RETRIES):
         try:
-            element = WebDriverWait(driver, PANEL_WAIT_SECONDS).until(
-                EC.element_to_be_clickable((By.XPATH, f'//div[@id="{cid}"]'))
-            )
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
-            time.sleep(0.8)
+            element = None
             try:
-                element.click()
-            except Exception:
-                driver.execute_script("arguments[0].click();", element)
-            WebDriverWait(driver, PANEL_WAIT_SECONDS).until(
-                lambda d: (
-                    len(d.find_elements(By.XPATH, "//div[contains(@class,'RSNrZe') and @role='button' and @aria-label='Share']")) > 0
-                    or len(d.find_elements(By.XPATH, "//div[@jsname='RSFNod' and @data-attrid='organic_offers_grid']")) > 0
+                element = WebDriverWait(driver, PANEL_WAIT_SECONDS).until(
+                    EC.presence_of_element_located((By.XPATH, f'//*[@id="{cid}"]'))
                 )
-            )
-            time.sleep(random.uniform(0.8, 1.5))
+            except Exception:
+                element = WebDriverWait(driver, PANEL_WAIT_SECONDS).until(
+                    EC.presence_of_element_located((By.XPATH, f'//div[@id="{cid}"]'))
+                )
+
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
+            time.sleep(0.5)
+
+            # Try clicking title link / anchor inside element first, fallback to element itself
+            clicked = False
+            for click_selector in [".//a", ".//div[contains(@class,'gkQHve')]", ".//img", "."]:
+                try:
+                    target = element.find_element(By.XPATH, click_selector) if click_selector != "." else element
+                    driver.execute_script("arguments[0].click();", target)
+                    clicked = True
+                    break
+                except Exception:
+                    continue
+
+            if not clicked:
+                try:
+                    element.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", element)
+
+            # Verify side panel loaded using multiple reliable panel XPATH selectors
+            panel_xpaths = [
+                "//div[@jsname='RSFNod']",
+                "//div[@data-attrid='organic_offers_grid']",
+                "//div[contains(@class,'R5K7Cb')]",
+                "//div[contains(@class,'RSNrZe') and @role='button']",
+                "//h3[contains(text(),'About this product')]",
+                "//div[@jsname='HhYL2b']"
+            ]
+
+            def panel_loaded(d):
+                for xp in panel_xpaths:
+                    if len(d.find_elements(By.XPATH, xp)) > 0:
+                        return True
+                return False
+
+            WebDriverWait(driver, PANEL_WAIT_SECONDS).until(panel_loaded)
+            time.sleep(random.uniform(0.5, 1.0))
             return True
         except Exception as exc:
             last_error = exc
-            time.sleep(1)
+            time.sleep(0.8)
     raise last_error or Exception("Product click failed")
 
 def attempt_selected_product(driver, base_result, product_meta, osb_url, fallback_first=False):
