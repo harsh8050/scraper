@@ -3294,10 +3294,21 @@ def extract_share_url(driver):
             share_url = ""
 
         if not share_url:
-            try:
-                share_url = share_dialog.find_element(By.CSS_SELECTOR, "div[jsname='tQ9n1c']").text.strip()
-            except Exception:
-                share_url = ""
+            for selector in [
+                "span[jsname='zgnjS']",
+                "span.F6Q4e",
+                ".F6Q4e",
+                "[jsname='zgnjS']",
+                "div[jsname='tQ9n1c']"
+            ]:
+                try:
+                    el = share_dialog.find_element(By.CSS_SELECTOR, selector)
+                    txt = el.text.strip()
+                    if txt.startswith("https://"):
+                        share_url = txt
+                        break
+                except Exception:
+                    continue
 
         try:
             close_button = share_dialog.find_element(By.CSS_SELECTOR, "[jsname='tqp7ud']")
