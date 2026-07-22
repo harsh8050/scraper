@@ -4480,33 +4480,13 @@ def process_chunk(df, chunk_id, total_chunks, round_id=1, output_dir='output', w
                         consecutive_timeouts_map[thread_id] = 0
 
                     if status_lower == 'captcha_failed':
-                        captcha_failures = captcha_failures_map.get(thread_id, 0) + 1
-                        captcha_failures_map[thread_id] = captcha_failures
-                        max_captcha_thread_retries = _env_int("CAPTCHA_THREAD_MAX_RETRIES", 10)
-                        
-                        if captcha_failures >= max_captcha_thread_retries:
-                            print(f"[Thread {thread_id}] !!! {captcha_failures} consecutive CAPTCHA failures. Stopping THIS thread.")
-                            break
-                        
-                        # Release product back to pending so another clean session can retry it
+                        # Release current product back to pending
                         release_claimed_products([product_id], resolved_worker_id, reason="captcha_failed")
                         
-                        print(f"[Thread {thread_id}] CAPTCHA on Product {product_id}. Skipping execution, restarting driver with fresh session, and trying next product...")
-                        try:
-                            driver.quit()
-                        except Exception:
-                            pass
-                        
-                        time.sleep(random.uniform(2, 4))
-                        
-                        try:
-                            driver = setup_driver(max_attempts=3, base_delay=3)
-                        except Exception as e:
-                            print(f"[Thread {thread_id}] Driver restart failed after CAPTCHA: {e}")
-                            break
-                        
-                        continue
-                    elif status_lower not in ('captcha_failed',):
+                        print(f"[Thread {thread_id}] !!! CAPTCHA detected and unable to resolve on Product {product_id}. Aborting full batch immediately so GitHub Actions can retry in a separate environment.")
+                        stop_event.set()
+                        break
+                    else:
                         # Reset captcha failure counter on any non-captcha result
                         captcha_failures_map[thread_id] = 0
                     
