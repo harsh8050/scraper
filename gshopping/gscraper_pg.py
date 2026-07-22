@@ -3346,11 +3346,7 @@ def expand_more_stores(driver):
 
 def populate_offers_for_selected_product(driver, result, product_id, osb_url, fallback_first=False):
     result['competitors'] = []
-    raw_url = (extract_share_url(driver) or driver.current_url or "").strip()
-    if raw_url.startswith("https://www.google.com/search?ibp=oshop") or raw_url.startswith("https://share.google/"):
-        result['product_url'] = raw_url
-    else:
-        result['product_url'] = ""
+    result['product_url'] = ""
 
     expand_more_stores(driver)
 
@@ -3551,6 +3547,11 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url, fa
     # ★ ONLY extract 'About this product' and expand 'More details' if OSB seller is present OR if storing details for fallback_first
     should_extract = (osb_position > 0) or fallback_first
     if should_extract:
+        # Extract share URL only when we are collecting attributes/data
+        raw_url = (extract_share_url(driver) or driver.current_url or "").strip()
+        if raw_url.startswith("https://www.google.com/search?ibp=oshop") or raw_url.startswith("https://share.google/"):
+            result['product_url'] = raw_url
+
         try:
             about_data_json = get_product_about_info(driver)
             about_data = json.loads(about_data_json)
