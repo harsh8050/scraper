@@ -3573,14 +3573,26 @@ def try_click_product(driver, cid, product_name=""):
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
             time.sleep(0.4)
 
-            # Try clicking title link / anchor / image inside element first, fallback to element itself
+            # Try clicking title div / image / non-support anchor inside element, fallback to element itself
             clicked = False
-            for click_selector in [".//a", ".//div[contains(@class,'gkQHve')]", ".//img", "."]:
+            click_selectors = [
+                ".//div[contains(@class,'gkQHve')]",
+                ".//a[not(contains(@href, 'support.google')) and not(contains(@href, 'google.com/support'))]",
+                ".//img",
+                "."
+            ]
+            for click_selector in click_selectors:
                 try:
-                    target = element.find_element(By.XPATH, click_selector) if click_selector != "." else element
-                    driver.execute_script("arguments[0].click();", target)
-                    clicked = True
-                    break
+                    targets = element.find_elements(By.XPATH, click_selector) if click_selector != "." else [element]
+                    for target in targets:
+                        href = (target.get_attribute("href") or "").lower()
+                        if "support.google" in href or "google.com/support" in href:
+                            continue
+                        driver.execute_script("arguments[0].click();", target)
+                        clicked = True
+                        break
+                    if clicked:
+                        break
                 except Exception:
                     continue
 
