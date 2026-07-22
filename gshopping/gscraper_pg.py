@@ -3514,24 +3514,51 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url, fa
 
     return result
 
-def try_click_product(driver, cid):
+def try_click_product(driver, cid, product_name=""):
     last_error = None
     for click_attempt in range(PRODUCT_CLICK_RETRIES):
         try:
             element = None
-            try:
-                element = WebDriverWait(driver, PANEL_WAIT_SECONDS).until(
-                    EC.presence_of_element_located((By.XPATH, f'//*[@id="{cid}"]'))
-                )
-            except Exception:
-                element = WebDriverWait(driver, PANEL_WAIT_SECONDS).until(
-                    EC.presence_of_element_located((By.XPATH, f'//div[@id="{cid}"]'))
-                )
+            
+            # Strategy 1: Find by CID (element ID)
+            if cid:
+                try:
+                    element = WebDriverWait(driver, 2).until(
+                        EC.presence_of_element_located((By.XPATH, f'//*[@id="{cid}"]'))
+                    )
+                except Exception:
+                    try:
+                        element = driver.find_element(By.XPATH, f'//div[@id="{cid}"]')
+                    except Exception:
+                        pass
+
+            # Strategy 2: Find card container by matching product title text
+            if element is None and product_name:
+                clean_name = product_name.replace('"', '').strip()
+                if len(clean_name) > 5:
+                    short_name = clean_name[:25]
+                    try:
+                        element = driver.find_element(
+                            By.XPATH, 
+                            f"//div[contains(@class,'MtXiu') and .//*[contains(text(), {json.dumps(short_name)})]]"
+                        )
+                    except Exception:
+                        pass
+
+            # Strategy 3: Fallback to any visible product card container
+            if element is None:
+                try:
+                    element = driver.find_element(By.XPATH, "//div[contains(@class,'MtXiu')]")
+                except Exception:
+                    pass
+
+            if element is None:
+                raise Exception(f"Product element not found (cid='{cid}', name='{product_name}')")
 
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
-            time.sleep(0.5)
+            time.sleep(0.4)
 
-            # Try clicking title link / anchor inside element first, fallback to element itself
+            # Try clicking title link / anchor / image inside element first, fallback to element itself
             clicked = False
             for click_selector in [".//a", ".//div[contains(@class,'gkQHve')]", ".//img", "."]:
                 try:
@@ -3583,13 +3610,13 @@ def attempt_selected_product(driver, base_result, product_meta, osb_url, fallbac
         'status': 'product_found',
     })
 
-    if not attempt_result['cid']:
+    if not attempt_result['cid'] and not attempt_result['product_name']:
         attempt_result['status'] = 'product_not_clickable'
-        attempt_result['last_response'] = 'Missing product CID'
+        attempt_result['last_response'] = 'Missing product CID and product name'
         return attempt_result
 
     try:
-        try_click_product(driver, attempt_result['cid'])
+        try_click_product(driver, attempt_result['cid'], product_name=attempt_result['product_name'])
         attempt_result['last_response'] = "Clicked on product successfully"
     except Exception as exc:
         attempt_result['status'] = 'product_not_clickable'
