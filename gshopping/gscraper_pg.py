@@ -3255,7 +3255,7 @@ def expand_more_stores(driver):
         except Exception:
             break
 
-def populate_offers_for_selected_product(driver, result, product_id, osb_url):
+def populate_offers_for_selected_product(driver, result, product_id, osb_url, fallback_first=False):
     result['competitors'] = []
     raw_url = (extract_share_url(driver) or driver.current_url or "").strip()
     if raw_url.startswith("https://www.google.com/search?ibp=oshop") or raw_url.startswith("https://share.google/"):
@@ -3288,44 +3288,6 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url):
 
     if exists > 0:
         result['options'] = get_product_options(driver)
-
-    # ★ NEW: Add product about info scraping
-    try:
-        about_data_json = get_product_about_info(driver)
-        about_data = json.loads(about_data_json)
-        result['product_about_info'] = about_data_json
-        result['description'] = about_data.get('description', '')
-        result['attributes'] = json.dumps(about_data.get('attributes', {}))
-        result['main_image'] = about_data.get('main_image', '')
-        result['gs_images'] = json.dumps(about_data.get('gs_images', []))
-        result['rating_star'] = about_data.get('rating_star')
-        result['rating_count'] = about_data.get('rating_count')
-        result['typical_price_low'] = about_data.get('typical_price_low')
-        result['typical_price_high'] = about_data.get('typical_price_high')
-        result['popular_url'] = about_data.get('popular_url', '')
-
-        # Extract mapped attributes and merge them into result
-        attr_dict = about_data.get('attributes', {})
-        mapped_attrs = extract_mapped_attributes(attr_dict)
-        result.update(mapped_attrs)
-
-        print("✓ Product about info, description, attributes, image, ratings, typical prices, and gallery extracted")
-    except Exception as e:
-        print(f"Error extracting product about info: {str(e)}")
-        result['product_about_info'] = json.dumps({'description': '', 'attributes': {}, 'main_image': '', 'gs_images': []})
-        result['description'] = ''
-        result['attributes'] = json.dumps({})
-        result['main_image'] = ''
-        result['gs_images'] = json.dumps([])
-        result['rating_star'] = None
-        result['rating_count'] = None
-        result['typical_price_low'] = None
-        result['typical_price_high'] = None
-        result['popular_url'] = ''
-        
-        # Merge empty mapped attributes
-        mapped_attrs = extract_mapped_attributes({})
-        result.update(mapped_attrs)
 
     offer_elements = offers_grid.find_elements(By.CLASS_NAME, 'R5K7Cb')
     print(f"Found {len(offer_elements)} offers")
@@ -3365,11 +3327,10 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url):
             elif "in stock" in row_text:
                 stock_status = "In Stock"
             else:
-                stock_status = "In Stock" # Default stock status
+                stock_status = "In Stock"
         except Exception:
             stock_status = "In Stock"
 
-        # Extract original price
         original_price = None
         try:
             old_price_el = seller_html.find_element(By.CSS_SELECTOR, "div.AoPnCe span[aria-hidden='true']")
@@ -3385,14 +3346,12 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url):
                 except Exception:
                     pass
 
-        # Compute discount amount
         discount_amount = None
         if original_price is not None:
             parsed_price = parse_price(seller_price)
             if parsed_price is not None:
                 discount_amount = original_price - parsed_price
 
-        # Extract seller rating
         seller_rating = None
         try:
             rating_el = seller_html.find_element(By.CSS_SELECTOR, "span.NFq8Ad")
@@ -3411,7 +3370,6 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url):
             except Exception:
                 pass
 
-        # Extract delivery tagline
         delivery_tagline = ""
         try:
             delivery_els = seller_html.find_elements(By.XPATH, ".//span[contains(@aria-label, 'delivery') or contains(@aria-label, 'Delivery') or contains(text(), 'delivery') or contains(text(), 'Delivery') or contains(text(), 'shipping') or contains(text(), 'Shipping')]")
@@ -3426,7 +3384,6 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url):
         except Exception:
             pass
 
-        # Extract coupon details
         coupon_code = ""
         coupon_remark = ""
         try:
@@ -3501,6 +3458,60 @@ def populate_offers_for_selected_product(driver, result, product_id, osb_url):
     })
     if seller_count == 0:
         result['product_url'] = ""
+
+    # ★ ONLY extract 'About this product' and expand 'More details' if OSB seller is present OR if storing details for fallback_first
+    should_extract = (osb_position > 0) or fallback_first
+    if should_extract:
+        try:
+            about_data_json = get_product_about_info(driver)
+            about_data = json.loads(about_data_json)
+            result['product_about_info'] = about_data_json
+            result['description'] = about_data.get('description', '')
+            result['attributes'] = json.dumps(about_data.get('attributes', {}))
+            result['main_image'] = about_data.get('main_image', '')
+            result['gs_images'] = json.dumps(about_data.get('gs_images', []))
+            result['rating_star'] = about_data.get('rating_star')
+            result['rating_count'] = about_data.get('rating_count')
+            result['typical_price_low'] = about_data.get('typical_price_low')
+            result['typical_price_high'] = about_data.get('typical_price_high')
+            result['popular_url'] = about_data.get('popular_url', '')
+
+            # Extract mapped attributes and merge them into result
+            attr_dict = about_data.get('attributes', {})
+            mapped_attrs = extract_mapped_attributes(attr_dict)
+            result.update(mapped_attrs)
+
+            print("✓ Product about info, description, attributes, image, ratings, typical prices, and gallery extracted")
+        except Exception as e:
+            print(f"Error extracting product about info: {str(e)}")
+            result['product_about_info'] = json.dumps({'description': '', 'attributes': {}, 'main_image': '', 'gs_images': []})
+            result['description'] = ''
+            result['attributes'] = json.dumps({})
+            result['main_image'] = ''
+            result['gs_images'] = json.dumps([])
+            result['rating_star'] = None
+            result['rating_count'] = None
+            result['typical_price_low'] = None
+            result['typical_price_high'] = None
+            result['popular_url'] = ''
+            
+            mapped_attrs = extract_mapped_attributes({})
+            result.update(mapped_attrs)
+    else:
+        print("Skipping 'About this product' / 'More details' expansion because OSB seller is not present on this card.")
+        result['product_about_info'] = json.dumps({'description': '', 'attributes': {}, 'main_image': '', 'gs_images': []})
+        result['description'] = ''
+        result['attributes'] = json.dumps({})
+        result['main_image'] = ''
+        result['gs_images'] = json.dumps([])
+        result['rating_star'] = None
+        result['rating_count'] = None
+        result['typical_price_low'] = None
+        result['typical_price_high'] = None
+        result['popular_url'] = ''
+        mapped_attrs = extract_mapped_attributes({})
+        result.update(mapped_attrs)
+
     return result
 
 def try_click_product(driver, cid):
@@ -3529,7 +3540,7 @@ def try_click_product(driver, cid):
             time.sleep(1)
     raise last_error or Exception("Product click failed")
 
-def attempt_selected_product(driver, base_result, product_meta, osb_url):
+def attempt_selected_product(driver, base_result, product_meta, osb_url, fallback_first=False):
     attempt_result = dict(base_result)
     attempt_result['competitors'] = []
     attempt_result.update({
@@ -3554,7 +3565,7 @@ def attempt_selected_product(driver, base_result, product_meta, osb_url):
         return attempt_result
 
     try:
-        return populate_offers_for_selected_product(driver, attempt_result, base_result['product_id'], osb_url)
+        return populate_offers_for_selected_product(driver, attempt_result, base_result['product_id'], osb_url, fallback_first=fallback_first)
     except Exception as exc:
         attempt_result['status'] = 'no_offers_found'
         attempt_result['last_response'] = f'No offers found: {str(exc)}'
@@ -3621,7 +3632,7 @@ def run_product_selection_phase(driver, product_id, phase_name, search_url, base
             checked_products.add(card_key)
 
         log_matching(product_id, f"Trying product {index}")
-        attempt_result = attempt_selected_product(driver, base_result, product_meta, osb_url)
+        attempt_result = attempt_selected_product(driver, base_result, product_meta, osb_url, fallback_first=fallback_first)
         attempt_result['url'] = search_url
 
         if fallback_result is None:
