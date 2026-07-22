@@ -3314,12 +3314,7 @@ def extract_share_url(driver):
                     driver.close()
             driver.switch_to.window(main_window)
 
-        # Wait for Share dialog to appear
-        share_dialog = WebDriverWait(driver, 5.0).until(
-            EC.visibility_of_element_located((By.XPATH, "//div[@role='dialog' and (contains(@aria-label,'Share') or contains(.,'Share'))]"))
-        )
-
-        # Dynamic polling for the share.google URL generated asynchronously by Google
+        # Dynamic polling for the share.google URL generated asynchronously by Google inside dialog overlay
         def get_share_link(d):
             for sel in [
                 "span[jsname='zgnjS']",
@@ -3329,18 +3324,20 @@ def extract_share_url(driver):
                 "div[jsname='tQ9n1c']"
             ]:
                 try:
-                    elem = share_dialog.find_element(By.CSS_SELECTOR, sel)
-                    t = elem.text.strip()
-                    if t.startswith("https://share.google/"):
-                        return t
+                    elems = d.find_elements(By.CSS_SELECTOR, sel)
+                    for elem in elems:
+                        t = elem.text.strip()
+                        if t.startswith("https://share.google/"):
+                            return t
                 except Exception:
                     continue
 
             try:
-                elem = share_dialog.find_element(By.XPATH, ".//*[contains(text(), 'share.google')]")
-                t = elem.text.strip()
-                if t.startswith("https://"):
-                    return t
+                elems = d.find_elements(By.XPATH, "//*[contains(text(), 'share.google')]")
+                for elem in elems:
+                    t = elem.text.strip()
+                    if t.startswith("https://share.google/"):
+                        return t
             except Exception:
                 pass
             return None
@@ -3352,15 +3349,19 @@ def extract_share_url(driver):
             share_url = ""
             print("Timed out waiting for share.google link to populate in Share dialog.")
 
-        # Close Share dialog
-        try:
-            close_button = share_dialog.find_element(By.CSS_SELECTOR, "[jsname='tqp7ud']")
-            close_button.click()
-        except Exception:
+        # Close Share dialog using exact selectors (class='xjR8dd' / jsname='tqp7ud')
+        for csel in [
+            "button[jsname='tqp7ud']",
+            "button.xjR8dd",
+            "button[aria-label='Close']",
+            "[jsname='tqp7ud']"
+        ]:
             try:
-                ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                cbtn = driver.find_element(By.CSS_SELECTOR, csel)
+                cbtn.click()
+                break
             except Exception:
-                pass
+                continue
     except Exception as e:
         print(f"Error extracting share URL: {e}")
         share_url = ""
