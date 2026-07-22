@@ -2507,8 +2507,27 @@ def setup_driver(max_attempts=3, base_delay=4, headless=False):
                 print(f"✓ Using pre-configured Chrome binary: {chrome_bin}")
 
             driver = uc.Chrome(**uc_kwargs)
-            normalize_driver_fingerprint(driver)
-            warm_google_session(driver)
+
+            # Wait up to 5 seconds for initial browser window to attach
+            start_w = time.time()
+            while time.time() - start_w < 5.0:
+                try:
+                    if driver.window_handles:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.3)
+
+            try:
+                normalize_driver_fingerprint(driver)
+            except Exception as fe:
+                print(f"Fingerprint normalization skipped: {fe}")
+
+            try:
+                warm_google_session(driver)
+            except Exception as we:
+                print(f"Session warm-up skipped: {we}")
+
             # Verify driver is healthy/responsive before returning
             _ = driver.current_url
             return driver
