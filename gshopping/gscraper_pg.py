@@ -384,6 +384,7 @@ def create_tables_if_needed():
         scraping_status VARCHAR(20)     DEFAULT 'pending',
         claimed_by      VARCHAR(128),
         claimed_at      DATETIME,
+        retry_count     INT             DEFAULT 0,
         keyword         VARCHAR(2048),
         url             VARCHAR(2048),
         last_attempt    DATETIME,
@@ -391,6 +392,7 @@ def create_tables_if_needed():
         created_at      DATETIME     DEFAULT CURRENT_TIMESTAMP,
         updated_at      DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_osb_scrape_queue (status, scraping_status, mfr_sales_30d),
+        INDEX idx_osb_dynamic_queue (status, scraping_status, retry_count, mfr_sales_30d, product_id),
         INDEX idx_osb_brand (brand),
         INDEX idx_osb_gtin (gtin),
         INDEX idx_osb_mpn (mpn)
@@ -534,6 +536,22 @@ def create_tables_if_needed():
             stmt = stmt.strip()
             if stmt:
                 cursor.execute(stmt)
+                
+        # Migrations for existing tables:
+        try:
+            cursor.execute("SHOW COLUMNS FROM osb_products LIKE 'retry_count'")
+            if not cursor.fetchone():
+                cursor.execute("ALTER TABLE osb_products ADD COLUMN retry_count INT DEFAULT 0")
+        except Exception:
+            pass
+
+        try:
+            cursor.execute("SHOW INDEX FROM osb_products WHERE Key_name = 'idx_osb_dynamic_queue'")
+            if not cursor.fetchone():
+                cursor.execute("CREATE INDEX idx_osb_dynamic_queue ON osb_products (status, scraping_status, retry_count, mfr_sales_30d, product_id)")
+        except Exception:
+            pass
+
         conn.commit()
     except Exception as e:
         print(f"Warning: Failed to ensure tables exist: {e}")
@@ -944,7 +962,6 @@ def insert_to_postgres(product_results, seller_results):
 
         # 3. Transactionally update scraping_status in osb_products table
         if product_results:
-            status_values = []
             for r in product_results:
                 p_id = _clean_int(r.get("product_id"))
                 if p_id is None:
@@ -954,19 +971,30 @@ def insert_to_postgres(product_results, seller_results):
                 if str(p_id) in retry_product_ids or p_id in retry_product_ids:
                     scr_status = 'pending'
                     err_msg = 'Invalid product URL, retrying'
+                    is_error = False
                 elif status_lower == 'completed' or status_lower == 'product_found':
                     scr_status = 'completed'
                     err_msg = None
+                    is_error = False
                 else:
                     scr_status = 'error'
                     raw_err = r.get('last_response') or f"Scrape ended with status: {status_lower}"
                     err_msg = _clean_str(raw_err, 1024, default=None)
-                
-                status_values.append((p_id, scr_status, err_msg))
+                    is_error = True
 
-            if status_values:
                 if _supports_claim_columns(cursor):
-                    for p_id, scr_status, err_msg in status_values:
+                    if is_error:
+                        cursor.execute("""
+                            UPDATE osb_products
+                            SET scraping_status = CASE WHEN retry_count + 1 >= 3 THEN 'error' ELSE 'pending' END,
+                                retry_count = retry_count + 1,
+                                last_attempt = CURRENT_TIMESTAMP(),
+                                error_message = %s,
+                                claimed_by = NULL,
+                                claimed_at = NULL
+                            WHERE product_id = %s
+                        """, (err_msg, p_id))
+                    else:
                         cursor.execute("""
                             UPDATE osb_products
                             SET scraping_status = %s,
@@ -977,7 +1005,16 @@ def insert_to_postgres(product_results, seller_results):
                             WHERE product_id = %s
                         """, (scr_status, err_msg, p_id))
                 else:
-                    for p_id, scr_status, err_msg in status_values:
+                    if is_error:
+                        cursor.execute("""
+                            UPDATE osb_products
+                            SET scraping_status = CASE WHEN retry_count + 1 >= 3 THEN 'error' ELSE 'pending' END,
+                                retry_count = retry_count + 1,
+                                last_attempt = CURRENT_TIMESTAMP(),
+                                error_message = %s
+                            WHERE product_id = %s
+                        """, (err_msg, p_id))
+                    else:
                         cursor.execute("""
                             UPDATE osb_products
                             SET scraping_status = %s,
@@ -1319,13 +1356,13 @@ def claim_pending_products_from_db(limit=30, worker_id=None, ttl_minutes=60):
             conn.rollback()
             return pd.DataFrame()
 
-        # Atomic SELECT then UPDATE pattern for MySQL
+        # Atomic SELECT then UPDATE pattern for MySQL with retry queue ordering
         cursor.execute(
             """
             SELECT product_id
             FROM osb_products
-            WHERE scraping_status = %s AND status = 1
-            ORDER BY mfr_sales_30d DESC, product_id ASC
+            WHERE status = 1 AND scraping_status = %s AND retry_count < 3
+            ORDER BY retry_count ASC, COALESCE(mfr_sales_30d, 0) DESC, product_id ASC
             LIMIT %s
             FOR UPDATE SKIP LOCKED
             """,
@@ -1693,10 +1730,8 @@ def update_product_status(product_id, scraping_status, error_message=None):
             except Exception:
                 pass
 
-def release_claimed_products(product_ids, worker_id=None, reason="not_processed"):
+def release_claimed_products(product_ids, worker_id=None, reason="not_processed", increment_retry=False):
     """Return unprocessed rows claimed by this worker to the pending queue."""
-    # Convert product_ids to integers since product_id is an integer/bigint column in the database.
-    # We handle potential float strings (e.g. "106766.0") and safely ignore non-numeric IDs.
     parsed_ids = []
     for pid in product_ids:
         if pid is None:
@@ -1726,19 +1761,32 @@ def release_claimed_products(product_ids, worker_id=None, reason="not_processed"
         cursor = conn.cursor()
         create_tables_if_needed()
         placeholders = ", ".join(["%s"] * len(parsed_ids))
-        cursor.execute(
-            f"""
-            UPDATE osb_products
-            SET scraping_status = %s,
-                claimed_by = NULL,
-                claimed_at = NULL,
-                error_message = %s
-            WHERE product_id IN ({placeholders})
-              AND scraping_status = %s
-              AND claimed_by = %s
-            """,
-            (PENDING_STATUS, reason, *parsed_ids, CLAIM_STATUS, resolved_worker_id),
-        )
+
+        if increment_retry or reason in ('captcha_failed', 'scrape_error', 'timeout_error'):
+            cursor.execute(
+                f"""
+                UPDATE osb_products
+                SET scraping_status = CASE WHEN retry_count + 1 >= 3 THEN 'error' ELSE 'pending' END,
+                    retry_count = retry_count + 1,
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    error_message = %s
+                WHERE product_id IN ({placeholders})
+                """,
+                (reason, *parsed_ids),
+            )
+        else:
+            cursor.execute(
+                f"""
+                UPDATE osb_products
+                SET scraping_status = %s,
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    error_message = %s
+                WHERE product_id IN ({placeholders})
+                """,
+                (PENDING_STATUS, reason, *parsed_ids),
+            )
         released = cursor.rowcount
         conn.commit()
         if released:

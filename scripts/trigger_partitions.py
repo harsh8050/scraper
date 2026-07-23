@@ -214,41 +214,21 @@ def main():
         
     try:
         buckets = get_boundaries()
+        print("\nDatabase Status Breakdown:")
+        for b_id, b_data in buckets.items():
+            print(f"Bucket {b_id}: Sales {b_data['start_sales_bound']} (ID {b_data['start_id_bound']}) to Sales {b_data['end_sales_bound']} (ID {b_data['end_id_bound']}) - count: {b_data['product_count']}")
     except Exception as e:
-        print(f"Error reading database boundaries: {e}")
-        return
-        
-    print("\nCalculated Boundaries:")
-    for b_id, b_data in buckets.items():
-        print(f"Bucket {b_id}: Sales {b_data['start_sales_bound']} (ID {b_data['start_id_bound']}) to Sales {b_data['end_sales_bound']} (ID {b_data['end_id_bound']}) - count: {b_data['product_count']}")
+        print(f"Note: Unable to read database boundaries ({e}). Continuing with queue dispatch.")
 
-    # Assign boundaries dynamically based on the number of buckets available
-    num_buckets = len(buckets)
-    if num_buckets == 0:
-        print("No active products found in database (status = 1). Skipping triggering.")
-        return
-        
-    print(f"\nAssigning boundaries and triggering workflows for {num_buckets} active bucket(s)...")
-    
-    for i in range(1, 5):
-        b_str = str(i)
-        if b_str in buckets:
-            # The last available bucket should have empty end bounds to cover all remaining products
-            is_last = (i == num_buckets)
-            
-            start_sales = "" if i == 1 else buckets[b_str]["start_sales_bound"]
-            start_id = "" if i == 1 else buckets[b_str]["start_id_bound"]
-            
-            end_sales = "" if is_last else buckets[b_str]["end_sales_bound"]
-            end_id = "" if is_last else buckets[b_str]["end_id_bound"]
-            
-            trigger_workflow(
-                accounts[b_str],
-                start_sales=start_sales,
-                start_id=start_id,
-                end_sales=end_sales,
-                end_id=end_id
-            )
+    print(f"\nTriggering workflows for {len(accounts)} account(s) in Dynamic Queue Mode...")
+    for acc_id in sorted(accounts.keys()):
+        trigger_workflow(
+            accounts[acc_id],
+            start_sales="",
+            start_id="",
+            end_sales="",
+            end_id=""
+        )
 
 if __name__ == "__main__":
     main()
